@@ -1,0 +1,12 @@
+# Test profile — Testcontainers overrides datasource/redis at runtime.
+# DataSource and Redis URLs are set programmatically in the test base classes.
+spring:
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    show-sql: true
+
+logging:
+  level:
+    com.urlshortener: DEBUG
+    org.testcontainers: INFO
