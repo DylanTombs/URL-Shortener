@@ -1,6 +1,8 @@
 package com.urlshortener.unit;
 
 import com.urlshortener.dto.ShortenRequest;
+import com.urlshortener.dto.ShortenResponse;
+import com.urlshortener.dto.StatsResponse;
 import com.urlshortener.exception.UrlExpiredException;
 import com.urlshortener.exception.UrlNotFoundException;
 import com.urlshortener.model.ShortenedUrl;
@@ -11,18 +13,25 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.time.Instant;
 import java.util.Optional;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 @DisplayName("UrlService")
 class UrlServiceTest {
+
+    private static final String BASE_URL = "https://sho.rt";
+    private static final String CODE = "aB3xK9mQ";
 
     @Mock
     private UrlRepository urlRepository;
@@ -42,25 +51,94 @@ class UrlServiceTest {
     @Test
     @DisplayName("shorten: valid URL returns response with code and shortUrl")
     void shorten_validUrl_returnsResponse() {
-        // TODO: implement when UrlService.shorten() exists
+        when(codeGenerator.generate()).thenReturn(CODE);
+        when(urlRepository.existsByCode(CODE)).thenReturn(false);
+        when(urlRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        ShortenResponse response = urlService.shorten(
+                new ShortenRequest("https://www.example.com/some/long/path", null),
+                BASE_URL);
+
+        assertThat(response.code()).isEqualTo(CODE);
+        assertThat(response.shortUrl()).isEqualTo(BASE_URL + "/" + CODE);
+        assertThat(response.expiresAt()).isNull();
     }
 
     @Test
     @DisplayName("shorten: invalid URL throws IllegalArgumentException")
     void shorten_invalidUrl_throwsException() {
-        // TODO: implement
+        assertThatThrownBy(() ->
+                urlService.shorten(new ShortenRequest("not-a-url", null), BASE_URL))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     @DisplayName("shorten: ttlDays set → expiresAt is populated")
     void shorten_withTtl_setsExpiresAt() {
-        // TODO: implement
+        when(codeGenerator.generate()).thenReturn(CODE);
+        when(urlRepository.existsByCode(CODE)).thenReturn(false);
+        when(urlRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        ShortenResponse response = urlService.shorten(
+                new ShortenRequest("https://www.example.com", 7),
+                BASE_URL);
+
+        assertThat(response.expiresAt()).isNotNull();
+        // expiresAt should be approximately 7 days from now
+        Instant sevenDaysFromNow = Instant.now().plusSeconds(7 * 24 * 60 * 60);
+        assertThat(response.expiresAt()).isBetween(
+                sevenDaysFromNow.minusSeconds(5),
+                sevenDaysFromNow.plusSeconds(5));
     }
 
     @Test
     @DisplayName("shorten: no ttlDays → expiresAt is null (never expires)")
     void shorten_withoutTtl_expiresAtIsNull() {
-        // TODO: implement
+        when(codeGenerator.generate()).thenReturn(CODE);
+        when(urlRepository.existsByCode(CODE)).thenReturn(false);
+        when(urlRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        ShortenResponse response = urlService.shorten(
+                new ShortenRequest("https://www.example.com", null),
+                BASE_URL);
+
+        assertThat(response.expiresAt()).isNull();
+    }
+
+    @Test
+    @DisplayName("shorten: code collision retries until a unique code is found")
+    void shorten_codeCollision_retries() {
+        String collision = "aaaaaaaa";
+        String unique = "bbbbbbbb";
+        when(codeGenerator.generate()).thenReturn(collision, unique);
+        when(urlRepository.existsByCode(collision)).thenReturn(true);
+        when(urlRepository.existsByCode(unique)).thenReturn(false);
+        when(urlRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        ShortenResponse response = urlService.shorten(
+                new ShortenRequest("https://www.example.com", null),
+                BASE_URL);
+
+        assertThat(response.code()).isEqualTo(unique);
+    }
+
+    @Test
+    @DisplayName("shorten: persists entity with correct fields")
+    void shorten_persistsEntityWithCorrectFields() {
+        when(codeGenerator.generate()).thenReturn(CODE);
+        when(urlRepository.existsByCode(CODE)).thenReturn(false);
+        when(urlRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        urlService.shorten(new ShortenRequest("https://www.example.com", null), BASE_URL);
+
+        ArgumentCaptor<ShortenedUrl> captor = ArgumentCaptor.forClass(ShortenedUrl.class);
+        verify(urlRepository).save(captor.capture());
+        ShortenedUrl saved = captor.getValue();
+
+        assertThat(saved.getCode()).isEqualTo(CODE);
+        assertThat(saved.getLongUrl()).isEqualTo("https://www.example.com");
+        assertThat(saved.getCreatedAt()).isNotNull();
+        assertThat(saved.getClickCount()).isZero();
     }
 
     // ---- resolveUrl() ----------------------------------------------------
@@ -70,32 +148,90 @@ class UrlServiceTest {
     void resolveUrl_unknownCode_throwsNotFoundException() {
         when(urlRepository.findByCode("unknown")).thenReturn(Optional.empty());
 
-        // TODO: uncomment when resolveUrl() is implemented
-        // assertThatThrownBy(() -> urlService.resolveUrl("unknown"))
-        //         .isInstanceOf(UrlNotFoundException.class);
+        assertThatThrownBy(() -> urlService.resolveUrl("unknown"))
+                .isInstanceOf(UrlNotFoundException.class);
     }
 
     @Test
     @DisplayName("resolveUrl: expired code throws UrlExpiredException")
     void resolveUrl_expiredCode_throwsExpiredException() {
         ShortenedUrl expired = ShortenedUrl.builder()
-                .code("abc12345")
+                .code(CODE)
                 .longUrl("https://example.com")
                 .createdAt(Instant.now().minusSeconds(3600))
-                .expiresAt(Instant.now().minusSeconds(60)) // already past
+                .expiresAt(Instant.now().minusSeconds(60))
                 .clickCount(0)
                 .build();
 
-        when(urlRepository.findByCode("abc12345")).thenReturn(Optional.of(expired));
+        when(urlRepository.findByCode(CODE)).thenReturn(Optional.of(expired));
 
-        // TODO: uncomment when resolveUrl() is implemented
-        // assertThatThrownBy(() -> urlService.resolveUrl("abc12345"))
-        //         .isInstanceOf(UrlExpiredException.class);
+        assertThatThrownBy(() -> urlService.resolveUrl(CODE))
+                .isInstanceOf(UrlExpiredException.class);
     }
 
     @Test
-    @DisplayName("resolveUrl: valid code returns long URL")
+    @DisplayName("resolveUrl: valid non-expired code returns long URL")
     void resolveUrl_validCode_returnsLongUrl() {
-        // TODO: implement
+        ShortenedUrl url = ShortenedUrl.builder()
+                .code(CODE)
+                .longUrl("https://example.com/original")
+                .createdAt(Instant.now().minusSeconds(60))
+                .expiresAt(null)
+                .clickCount(5)
+                .build();
+
+        when(urlRepository.findByCode(CODE)).thenReturn(Optional.of(url));
+
+        String result = urlService.resolveUrl(CODE);
+
+        assertThat(result).isEqualTo("https://example.com/original");
+    }
+
+    @Test
+    @DisplayName("resolveUrl: link expiring in the future is still valid")
+    void resolveUrl_futureExpiry_isValid() {
+        ShortenedUrl url = ShortenedUrl.builder()
+                .code(CODE)
+                .longUrl("https://example.com")
+                .createdAt(Instant.now().minusSeconds(60))
+                .expiresAt(Instant.now().plusSeconds(3600))
+                .clickCount(0)
+                .build();
+
+        when(urlRepository.findByCode(CODE)).thenReturn(Optional.of(url));
+
+        assertThat(urlService.resolveUrl(CODE)).isEqualTo("https://example.com");
+    }
+
+    // ---- getStats() ------------------------------------------------------
+
+    @Test
+    @DisplayName("getStats: unknown code throws UrlNotFoundException")
+    void getStats_unknownCode_throwsNotFoundException() {
+        when(urlRepository.findByCode("unknown")).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> urlService.getStats("unknown"))
+                .isInstanceOf(UrlNotFoundException.class);
+    }
+
+    @Test
+    @DisplayName("getStats: returns click count and createdAt")
+    void getStats_returnsStats() {
+        Instant created = Instant.now().minusSeconds(3600);
+        ShortenedUrl url = ShortenedUrl.builder()
+                .code(CODE)
+                .longUrl("https://example.com")
+                .createdAt(created)
+                .expiresAt(null)
+                .clickCount(42)
+                .build();
+
+        when(urlRepository.findByCode(CODE)).thenReturn(Optional.of(url));
+
+        StatsResponse stats = urlService.getStats(CODE);
+
+        assertThat(stats.code()).isEqualTo(CODE);
+        assertThat(stats.clickCount()).isEqualTo(42);
+        assertThat(stats.createdAt()).isEqualTo(created);
     }
 }

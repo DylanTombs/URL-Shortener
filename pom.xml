@@ -19,7 +19,7 @@
 
     <properties>
         <java.version>21</java.version>
-        <testcontainers.version>1.20.4</testcontainers.version>
+        <testcontainers.version>1.21.3</testcontainers.version>
         <bucket4j.version>8.10.1</bucket4j.version>
     </properties>
 
@@ -140,16 +140,41 @@
                 </configuration>
             </plugin>
 
+            <!-- Failsafe — runs *IT.java integration tests during verify phase (requires Docker) -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
             <!-- JaCoCo — enforce 80% coverage -->
             <plugin>
                 <groupId>org.jacoco</groupId>
                 <artifactId>jacoco-maven-plugin</artifactId>
-                <version>0.8.12</version>
+                <version>0.8.13</version>
                 <executions>
                     <execution>
                         <goals>
                             <goal>prepare-agent</goal>
                         </goals>
+                        <!-- Exclude JDK bootstrap classes so JaCoCo does not attempt
+                             to instrument classes compiled for a newer JDK than it supports -->
+                        <configuration>
+                            <excludes>
+                                <exclude>java/*</exclude>
+                                <exclude>javax/*</exclude>
+                                <exclude>jdk/*</exclude>
+                                <exclude>sun/*</exclude>
+                                <exclude>com/sun/*</exclude>
+                            </excludes>
+                        </configuration>
                     </execution>
                     <execution>
                         <id>report</id>
