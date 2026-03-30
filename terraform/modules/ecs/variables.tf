@@ -42,6 +42,12 @@ variable "redis_endpoint" {
   type        = string
 }
 
+variable "app_base_url" {
+  description = "Public base URL served to clients (e.g. https://sho.rt). Injected as APP_BASE_URL."
+  type        = string
+  default     = "https://sho.rt"
+}
+
 variable "task_cpu" {
   description = "Fargate task CPU units (256, 512, 1024, 2048, 4096)"
   type        = number

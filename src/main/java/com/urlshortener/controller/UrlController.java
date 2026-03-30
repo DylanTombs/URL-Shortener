@@ -4,10 +4,10 @@ import com.urlshortener.dto.ShortenRequest;
 import com.urlshortener.dto.ShortenResponse;
 import com.urlshortener.dto.StatsResponse;
 import com.urlshortener.service.UrlService;
-import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -32,6 +32,9 @@ import java.net.URI;
 @Slf4j
 public class UrlController {
 
+    @Value("${app.base-url}")
+    private String baseUrl;
+
     private final UrlService urlService;
 
     /**
@@ -40,11 +43,8 @@ public class UrlController {
      */
     @PostMapping("/api/v1/urls")
     public ResponseEntity<ShortenResponse> shorten(
-            @Valid @RequestBody ShortenRequest request,
-            HttpServletRequest httpRequest) {
+            @Valid @RequestBody ShortenRequest request) {
 
-        // TODO: derive baseUrl from request (scheme + host + port)
-        String baseUrl = "https://sho.rt"; // placeholder
         ShortenResponse response = urlService.shorten(request, baseUrl);
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
@@ -52,10 +52,13 @@ public class UrlController {
     /**
      * Redirect to the original URL.
      * Returns 301 Moved Permanently — browsers cache this, reducing load.
+     * Click count is incremented after a successful resolution (separate write tx,
+     * always fires even when the URL is served from Redis cache).
      */
     @GetMapping("/{code}")
     public ResponseEntity<Void> redirect(@PathVariable String code) {
         String longUrl = urlService.resolveUrl(code);
+        urlService.incrementClickCount(code);
         return ResponseEntity.status(HttpStatus.MOVED_PERMANENTLY)
                 .header(HttpHeaders.LOCATION, longUrl)
                 .build();

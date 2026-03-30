@@ -39,8 +39,27 @@ resource "aws_cloudwatch_log_group" "app" {
   tags              = var.tags
 }
 
+# ── SSM Parameters ─────────────────────────────────────────────────────────────
+# Application config injected at task startup via ECS secrets field.
+# Stored as plain String (not SecureString) — neither value is a credential.
+
+resource "aws_ssm_parameter" "redis_host" {
+  name  = "/${var.name}/${var.environment}/redis-host"
+  type  = "String"
+  value = var.redis_endpoint
+  tags  = var.tags
+}
+
+resource "aws_ssm_parameter" "app_base_url" {
+  name  = "/${var.name}/${var.environment}/app-base-url"
+  type  = "String"
+  value = var.app_base_url
+  tags  = var.tags
+}
+
 # ── IAM — Execution Role ───────────────────────────────────────────────────────
-# Used by the ECS agent to pull images from ECR and write logs to CloudWatch.
+# Used by the ECS agent to pull images from ECR, write logs, and fetch secrets
+# and SSM parameters before the container starts.
 
 resource "aws_iam_role" "execution" {
   name = "${var.name}-${var.environment}-ecs-execution"
@@ -62,6 +81,7 @@ resource "aws_iam_role_policy_attachment" "execution_managed" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
+# Execution role needs GetSecretValue to inject DB credentials at task startup.
 resource "aws_iam_role_policy" "execution_secrets" {
   name = "${var.name}-${var.environment}-execution-secrets"
   role = aws_iam_role.execution.id
@@ -76,8 +96,26 @@ resource "aws_iam_role_policy" "execution_secrets" {
   })
 }
 
+# Execution role needs GetParameters to inject SSM params at task startup.
+resource "aws_iam_role_policy" "execution_ssm" {
+  name = "${var.name}-${var.environment}-execution-ssm"
+  role = aws_iam_role.execution.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = ["ssm:GetParameters"]
+      Resource = [
+        aws_ssm_parameter.redis_host.arn,
+        aws_ssm_parameter.app_base_url.arn
+      ]
+    }]
+  })
+}
+
 # ── IAM — Task Role ────────────────────────────────────────────────────────────
-# Used by the running application container.
+# Used by the running application container for runtime AWS API calls.
 
 resource "aws_iam_role" "task" {
   name = "${var.name}-${var.environment}-ecs-task"
@@ -94,6 +132,7 @@ resource "aws_iam_role" "task" {
   tags = var.tags
 }
 
+# Task role: CloudWatch metrics (Phase 4 prereq) + log streaming.
 resource "aws_iam_role_policy" "task_cloudwatch" {
   name = "${var.name}-${var.environment}-task-cloudwatch"
   role = aws_iam_role.task.id
@@ -110,6 +149,31 @@ resource "aws_iam_role_policy" "task_cloudwatch" {
       ]
       Resource = "*"
     }]
+  })
+}
+
+# Task role: runtime access to DB secret and SSM params (if app reads them directly).
+resource "aws_iam_role_policy" "task_secrets_ssm" {
+  name = "${var.name}-${var.environment}-task-secrets-ssm"
+  role = aws_iam_role.task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue"]
+        Resource = [var.db_secret_arn]
+      },
+      {
+        Effect = "Allow"
+        Action = ["ssm:GetParameters"]
+        Resource = [
+          aws_ssm_parameter.redis_host.arn,
+          aws_ssm_parameter.app_base_url.arn
+        ]
+      }
+    ]
   })
 }
 
@@ -166,23 +230,19 @@ resource "aws_ecs_task_definition" "app" {
 
     environment = [
       { name = "SERVER_PORT", value = "8080" },
-      { name = "SPRING_PROFILES_ACTIVE", value = "prod" },
-      {
-        name  = "SPRING_DATASOURCE_URL"
-        value = "jdbc:postgresql://${var.db_primary_endpoint}:5432/${var.db_name}"
-      },
-      {
-        name  = "SPRING_DATASOURCE_READ_URL"
-        value = "jdbc:postgresql://${var.db_replica_endpoint}:5432/${var.db_name}"
-      },
-      { name = "SPRING_DATA_REDIS_HOST", value = var.redis_endpoint },
+      { name = "SPRING_PROFILES_ACTIVE", value = var.environment },
       { name = "SPRING_DATA_REDIS_PORT", value = "6379" }
     ]
 
-    # Credentials injected from Secrets Manager — never in plaintext env vars
+    # All credentials and environment-specific config injected from
+    # Secrets Manager / SSM at task startup — never in plaintext env vars.
     secrets = [
+      { name = "SPRING_DATASOURCE_URL",      valueFrom = "${var.db_secret_arn}:url::" },
       { name = "SPRING_DATASOURCE_USERNAME", valueFrom = "${var.db_secret_arn}:username::" },
-      { name = "SPRING_DATASOURCE_PASSWORD", valueFrom = "${var.db_secret_arn}:password::" }
+      { name = "SPRING_DATASOURCE_PASSWORD", valueFrom = "${var.db_secret_arn}:password::" },
+      { name = "DB_REPLICA_URL",             valueFrom = "${var.db_secret_arn}:replica_url::" },
+      { name = "SPRING_DATA_REDIS_HOST",     valueFrom = aws_ssm_parameter.redis_host.arn },
+      { name = "APP_BASE_URL",               valueFrom = aws_ssm_parameter.app_base_url.arn }
     ]
 
     logConfiguration = {
@@ -227,7 +287,16 @@ resource "aws_ecs_service" "app" {
     container_port   = 8080
   }
 
-  depends_on = [aws_iam_role_policy_attachment.execution_managed]
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.execution_managed,
+    aws_iam_role_policy.execution_secrets,
+    aws_iam_role_policy.execution_ssm
+  ]
 
   tags = merge(var.tags, { Name = "${var.name}-${var.environment}-service" })
 
@@ -237,7 +306,9 @@ resource "aws_ecs_service" "app" {
   }
 }
 
-# ── Auto Scaling ───────────────────────────────────────────────────────────────
+# ── Auto Scaling — CPU target tracking at 60% ──────────────────────────────────
+# Scale out aggressively (60s cooldown) to absorb traffic spikes quickly.
+# Scale in conservatively (300s cooldown) to avoid flapping under bursty load.
 
 resource "aws_appautoscaling_target" "ecs" {
   max_capacity       = var.max_capacity
@@ -258,7 +329,7 @@ resource "aws_appautoscaling_policy" "cpu" {
     predefined_metric_specification {
       predefined_metric_type = "ECSServiceAverageCPUUtilization"
     }
-    target_value       = 70.0
+    target_value       = 60.0
     scale_in_cooldown  = 300
     scale_out_cooldown = 60
   }

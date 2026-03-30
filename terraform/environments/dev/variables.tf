@@ -9,3 +9,9 @@ variable "certificate_arn" {
   type        = string
   default     = ""
 }
+
+variable "app_base_url" {
+  description = "Public base URL for shortened links (e.g. https://dev.sho.rt)"
+  type        = string
+  default     = "https://sho.rt"
+}
