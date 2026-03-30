@@ -10,6 +10,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.cache.CacheManager;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -20,6 +21,7 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.time.Instant;
+import java.util.Set;
 
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.matchesPattern;
@@ -67,15 +69,17 @@ class UrlControllerIT {
     @Autowired MockMvc mockMvc;
     @Autowired UrlRepository urlRepository;
     @Autowired CacheManager cacheManager;
+    @Autowired StringRedisTemplate stringRedisTemplate;
 
     @BeforeEach
     void cleanState() {
         urlRepository.deleteAll();
-        // Clear Redis cache so previous test results don't bleed across tests
-        cacheManager.getCacheNames().forEach(name -> {
-            var cache = cacheManager.getCache(name);
-            if (cache != null) cache.clear();
-        });
+        // Flush all Redis keys — clears both Spring Cache entries (URL cache)
+        // and Bucket4j rate-limit buckets stored directly in Redis.
+        Set<String> allKeys = stringRedisTemplate.keys("*");
+        if (allKeys != null && !allKeys.isEmpty()) {
+            stringRedisTemplate.delete(allKeys);
+        }
     }
 
     // ---- POST /api/v1/urls -----------------------------------------------
@@ -144,7 +148,6 @@ class UrlControllerIT {
     @Test
     @DisplayName("GET /{code}: known code returns 301 with Location header")
     void redirect_knownCode_returns301() throws Exception {
-        // Shorten first
         String response = mockMvc.perform(post("/api/v1/urls")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
@@ -173,14 +176,36 @@ class UrlControllerIT {
 
         String code = extractCode(response);
 
-        // First call — cache miss, hits DB
-        mockMvc.perform(get("/" + code))
-                .andExpect(status().isMovedPermanently());
+        mockMvc.perform(get("/" + code)).andExpect(status().isMovedPermanently());
 
-        // Second call — should be served from Redis cache
         mockMvc.perform(get("/" + code))
                 .andExpect(status().isMovedPermanently())
                 .andExpect(header().string("Location", "https://www.example.com/cached"));
+    }
+
+    @Test
+    @DisplayName("GET /{code}: click_count increments on each redirect (even cache hits)")
+    void redirect_incrementsClickCount() throws Exception {
+        String response = mockMvc.perform(post("/api/v1/urls")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"url": "https://www.example.com/click-count-target"}
+                                """)
+                        .header("X-Forwarded-For", "10.0.10.1"))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+
+        String code = extractCode(response);
+
+        // Two redirects — second one is served from Redis cache but still increments
+        mockMvc.perform(get("/" + code).header("X-Forwarded-For", "10.0.10.1"))
+                .andExpect(status().isMovedPermanently());
+        mockMvc.perform(get("/" + code).header("X-Forwarded-For", "10.0.10.1"))
+                .andExpect(status().isMovedPermanently());
+
+        mockMvc.perform(get("/api/v1/urls/" + code + "/stats"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.clickCount").value(2));
     }
 
     @Test
@@ -194,7 +219,6 @@ class UrlControllerIT {
     @Test
     @DisplayName("GET /{code}: expired code returns 410")
     void redirect_expiredCode_returns410() throws Exception {
-        // Insert expired record directly — bypasses service TTL logic intentionally
         urlRepository.save(ShortenedUrl.builder()
                 .code("expired1")
                 .longUrl("https://example.com")
@@ -208,12 +232,40 @@ class UrlControllerIT {
                 .andExpect(jsonPath("$.error").value("EXPIRED"));
     }
 
+    @Test
+    @DisplayName("GET /{code}: 61st redirect within 1 minute returns 429 with Retry-After")
+    void redirect_rateLimitExceeded_returns429() throws Exception {
+        // Use a unique IP for this test so it has its own clean bucket
+        String testIp = "10.99.0.1";
+
+        String response = mockMvc.perform(post("/api/v1/urls")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"url": "https://www.example.com/rate-limit-target"}
+                                """)
+                        .header("X-Forwarded-For", "10.99.0.99"))  // different IP for POST
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+
+        String code = extractCode(response);
+
+        // First 60 redirects — all should succeed
+        for (int i = 0; i < 60; i++) {
+            mockMvc.perform(get("/" + code).header("X-Forwarded-For", testIp))
+                    .andExpect(status().isMovedPermanently());
+        }
+
+        // 61st — bucket exhausted, must return 429 with Retry-After
+        mockMvc.perform(get("/" + code).header("X-Forwarded-For", testIp))
+                .andExpect(status().isTooManyRequests())
+                .andExpect(header().exists("Retry-After"));
+    }
+
     // ---- GET /api/v1/urls/{code}/stats -----------------------------------
 
     @Test
     @DisplayName("GET /api/v1/urls/{code}/stats: returns 200 with code and clickCount")
     void stats_knownCode_returns200() throws Exception {
-        // Shorten to get a real code in the DB
         String response = mockMvc.perform(post("/api/v1/urls")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
@@ -241,9 +293,7 @@ class UrlControllerIT {
 
     // ---- helpers ---------------------------------------------------------
 
-    /** Extract the "code" field from a JSON shorten response string. */
     private static String extractCode(String json) {
-        // Simple parse — avoids pulling in a JSON library just for test helpers
         int start = json.indexOf("\"code\":\"") + 8;
         int end = json.indexOf('"', start);
         return json.substring(start, end);

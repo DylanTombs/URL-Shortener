@@ -21,7 +21,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 public class ReadWriteRoutingDataSource extends AbstractRoutingDataSource {
 
     @Override
-    protected Object determineCurrentLookupKey() {
+    public Object determineCurrentLookupKey() {
         // Prefer explicit context override (for manual routing outside transactions)
         DataSourceType explicit = DataSourceContextHolder.get();
         if (explicit != null) {
