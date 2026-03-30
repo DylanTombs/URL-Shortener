@@ -91,6 +91,7 @@ module "ecs" {
   db_name             = module.rds.db_name
   db_secret_arn       = module.rds.secret_arn
   redis_endpoint      = module.elasticache.primary_endpoint
+  app_base_url        = var.app_base_url
 
   task_cpu           = 1024
   task_memory        = 2048
