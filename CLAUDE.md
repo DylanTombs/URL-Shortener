@@ -23,21 +23,27 @@ Not a tutorial project. Every decision is documented and justifiable in an inter
 ```
 url-shortener/
 ├── src/main/java/com/urlshortener/
-│   ├── controller/     UrlController.java
-│   ├── service/        UrlService.java, CodeGenerator.java
+│   ├── controller/     UrlController.java, GlobalExceptionHandler.java
+│   ├── service/        UrlService.java, CodeGenerator.java, Base62CodeGenerator.java
 │   ├── repository/     UrlRepository.java
 │   ├── model/          ShortenedUrl.java
-│   ├── dto/            ShortenRequest.java, ShortenResponse.java
+│   ├── dto/            ShortenRequest.java, ShortenResponse.java, StatsResponse.java, ErrorResponse.java
 │   ├── exception/      UrlNotFoundException.java, UrlExpiredException.java
-│   └── config/         RedisConfig.java, RateLimitConfig.java
+│   └── config/         RedisConfig.java, RateLimitConfig.java, DataSourceConfig.java,
+│                       RateLimitInterceptor.java, WebMvcConfig.java,
+│                       ObservabilityConfig.java, MdcRequestIdFilter.java
 ├── src/test/
-│   ├── unit/           CodeGeneratorTest.java, UrlServiceTest.java
-│   └── integration/    UrlControllerIntegrationTest.java
+│   ├── unit/           CodeGeneratorTest.java, UrlServiceTest.java, RateLimitInterceptorTest.java
+│   └── integration/    UrlControllerIT.java
+├── db/migration/       V1__create_shortened_urls.sql
 ├── terraform/
-│   ├── modules/        vpc/, ecs/, rds/, elasticache/, alb/, waf/
+│   ├── modules/        vpc/, ecs/, rds/, elasticache/, alb/, waf/, cloudwatch/, github-oidc/
 │   ├── environments/   dev/, prod/
 │   └── main.tf
-└── .github/workflows/  ci.yml, cd.yml
+├── .github/workflows/  ci.yml, cd.yml
+├── docs/               phase2.md, phase3.md, phase4.md, phase5.md
+├── k6/                 smoke.js, load.js, spike.js
+└── Dockerfile
 ```
 
 ---
@@ -140,12 +146,47 @@ Partial index on expires_at — only rows that actually expire need it.
 
 ---
 
-## Phase Tracker
-- [ ] Phase 1 — Core service (Spring Boot, two endpoints, tests)
-- [ ] Phase 2 — Infrastructure as code (Terraform modules)
-- [ ] Phase 3 — CI/CD pipeline (GitHub Actions)
-- [ ] Phase 4 — Observability (structured logs, CloudWatch metrics, alarms, dashboard)
-- [ ] Phase 5 — Polish and documentation (load test with k6, all docs complete)
+## Phase Tracker & Todo List
+
+### Phase 1 — Core Service ✅ COMPLETE
+All endpoints, unit + integration tests (Testcontainers), JaCoCo 80% gate.
+
+### Phase 2 — Infrastructure Hardening (Current Phase)
+- [ ] Fix hardcoded base URL in `UrlController` → inject `@Value("${app.base-url}")`
+- [ ] Implement `click_count` increment via `@Modifying` query in `UrlRepository`
+- [ ] Implement Bucket4j rate limiting in `RateLimitConfig` + new `RateLimitInterceptor`
+- [ ] Implement read replica routing via `AbstractRoutingDataSource` + `LazyConnectionDataSourceProxy`
+- [ ] Complete ECS task definition in Terraform with Secrets Manager injection
+- [ ] Add ECS auto-scaling policy (CPU target tracking at 60%)
+- [ ] Write tests: `RateLimitInterceptorTest`, extend `UrlControllerIT` (click count + rate limit)
+- [ ] See `docs/phase2.md` for full implementation details
+
+### Phase 3 — CI/CD Pipeline
+- [ ] Write multi-stage `Dockerfile` (Maven build + JRE21 alpine runtime, non-root user)
+- [ ] Create `.github/workflows/ci.yml` (build → test → ECR push → Trivy scan → deploy-dev)
+- [ ] Create `.github/workflows/cd.yml` (ECS rolling deploy to prod, manual approval gate)
+- [ ] Add `terraform/modules/github-oidc/` — OIDC provider + IAM role (no long-lived keys)
+- [ ] Configure required GitHub Secrets (AWS_ROLE_ARN_DEV, ECR_REGISTRY, etc.)
+- [ ] Create `production` GitHub environment with required reviewer
+- [ ] See `docs/phase3.md` for full pipeline design
+
+### Phase 4 — Observability
+- [ ] Create `MdcRequestIdFilter` — per-request trace ID in structured logs
+- [ ] Create `logback-spring.xml` — JSON log format with MDC fields as top-level keys
+- [ ] Create `ObservabilityConfig` — CloudWatch Micrometer registry + environment tag
+- [ ] Instrument `UrlService` with 4 custom metrics: `url.created`, `url.redirect` timer, `url.not_found`, `url.expired`
+- [ ] Create `terraform/modules/cloudwatch/` — 4 alarms + 6-widget dashboard
+- [ ] Wire cloudwatch module into dev and prod environment Terraform
+- [ ] See `docs/phase4.md` for full observability design
+
+### Phase 5 — Polish and Documentation
+- [ ] Write `k6/smoke.js` (5 VUs, 1 min), `k6/load.js` (50 VUs, 10 min), `k6/spike.js` (500 VUs burst)
+- [ ] Write `ARCHITECTURE.md` (9 sections: overview, diagram, request flows, caching, DB, network, security, ops)
+- [ ] Write `DECISIONS.md` (7 decisions with context/options/consequences/at-10x format)
+- [ ] Write `RUNBOOK.md` (8 operational scenarios, all commands copy-pasteable)
+- [ ] Update `README.md` — local setup under 10 minutes from fresh clone
+- [ ] Run all k6 tests; confirm all thresholds pass
+- [ ] See `docs/phase5.md` for full verification checklist
 
 ---
 
