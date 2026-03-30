@@ -59,4 +59,4 @@ logging:
     com.urlshortener: DEBUG
 
 app:
-  base-url: ${BASE_URL:https://sho.rt}
+  base-url: ${APP_BASE_URL:https://sho.rt}
