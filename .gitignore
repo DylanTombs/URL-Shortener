@@ -37,7 +37,7 @@ target/
 **/.terraform/
 *.tfstate
 *.tfstate.backup
-.terraform.lock.hcl
+# Note: .terraform.lock.hcl is intentionally NOT ignored — commit it for reproducible provider versions
 
 # Secrets — never commit these
 .env
