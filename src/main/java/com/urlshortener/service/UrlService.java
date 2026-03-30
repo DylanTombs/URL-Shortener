@@ -114,6 +114,18 @@ public class UrlService {
                 .build();
     }
 
+    /**
+     * Increment the click counter for a short code.
+     * Runs as a write transaction — routes to the primary DataSource.
+     * Called separately from resolveUrl so it always fires, even on cache hits.
+     *
+     * @param code the short code that was resolved
+     */
+    @Transactional
+    public void incrementClickCount(String code) {
+        urlRepository.incrementClickCount(code);
+    }
+
     // ---- private helpers -------------------------------------------------
 
     private void validateUrl(String url) {

@@ -52,10 +52,13 @@ public class UrlController {
     /**
      * Redirect to the original URL.
      * Returns 301 Moved Permanently — browsers cache this, reducing load.
+     * Click count is incremented after a successful resolution (separate write tx,
+     * always fires even when the URL is served from Redis cache).
      */
     @GetMapping("/{code}")
     public ResponseEntity<Void> redirect(@PathVariable String code) {
         String longUrl = urlService.resolveUrl(code);
+        urlService.incrementClickCount(code);
         return ResponseEntity.status(HttpStatus.MOVED_PERMANENTLY)
                 .header(HttpHeaders.LOCATION, longUrl)
                 .build();
