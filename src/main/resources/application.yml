@@ -12,6 +12,10 @@ spring:
       connection-timeout: 30000
       idle-timeout: 600000
       max-lifetime: 1800000
+    replica:
+      url: ${DB_REPLICA_URL:${spring.datasource.url}}
+      username: ${DB_REPLICA_USERNAME:${spring.datasource.username}}
+      password: ${DB_REPLICA_PASSWORD:${spring.datasource.password}}
 
   jpa:
     hibernate:
