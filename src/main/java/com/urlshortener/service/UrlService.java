@@ -7,9 +7,12 @@ import com.urlshortener.exception.UrlExpiredException;
 import com.urlshortener.exception.UrlNotFoundException;
 import com.urlshortener.model.ShortenedUrl;
 import com.urlshortener.repository.UrlRepository;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.cache.annotation.Cacheable;
+import org.springframework.cache.Cache;
+import org.springframework.cache.CacheManager;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -23,10 +26,16 @@ import java.util.Objects;
  * Core business logic for creating and resolving short URLs.
  *
  * Cache strategy:
- *   - Only the redirect path is cached (@Cacheable on resolveUrl).
- *   - Write path is never cached — cache-aside on reads only.
- *   - Cache TTL = min(24h, time-to-expiry) so stale expired links are never served.
- *     TTL is set in RedisConfig via RedisCacheConfiguration per-cache config.
+ *   - Only the redirect path is cached — cache-aside on reads only.
+ *   - @Cacheable is replaced with explicit cache logic so we can observe
+ *     cache hits vs misses and publish the cache_hit tag on url.redirect.
+ *   - Cache TTL is managed by RedisConfig (24h default).
+ *
+ * Metrics emitted:
+ *   url.created         Counter   — after successful shorten()
+ *   url.redirect        Timer     — wraps resolveUrl(), tagged cache_hit=true|false
+ *   url.not_found       Counter   — when UrlNotFoundException is thrown
+ *   url.expired         Counter   — when UrlExpiredException is thrown
  */
 @Service
 @RequiredArgsConstructor
@@ -34,16 +43,15 @@ import java.util.Objects;
 public class UrlService {
 
     private static final int MAX_COLLISION_RETRIES = 5;
+    private static final String CACHE_NAME = "urls";
 
     private final UrlRepository urlRepository;
     private final CodeGenerator codeGenerator;
+    private final CacheManager cacheManager;
+    private final MeterRegistry meterRegistry;
 
     /**
      * Create a new shortened URL.
-     *
-     * @param request validated shorten request
-     * @param baseUrl the public base URL (e.g. "https://sho.rt")
-     * @return response with generated code, full short URL, and optional expiry
      */
     @Transactional
     public ShortenResponse shorten(ShortenRequest request, String baseUrl) {
@@ -63,6 +71,7 @@ public class UrlService {
                 .build();
         ShortenedUrl saved = urlRepository.save(Objects.requireNonNull(entity));
 
+        meterRegistry.counter("url.created").increment();
         log.info("url_shortened code={} ttlDays={}", saved.getCode(), request.ttlDays());
 
         return ShortenResponse.builder()
@@ -74,33 +83,62 @@ public class UrlService {
 
     /**
      * Resolve a short code to its original URL.
-     * Result is cached in Redis under cache name "urls".
      *
-     * @param code the short code
-     * @return the original long URL
-     * @throws UrlNotFoundException if code does not exist
-     * @throws UrlExpiredException  if code exists but TTL has passed
+     * Explicit cache logic (replaces @Cacheable) so cache hit/miss can be observed.
+     * Timer tag cache_hit=true|false drives the cache hit rate alarm and dashboard widget.
      */
-    @Cacheable(cacheNames = "urls", key = "#code")
     @Transactional(readOnly = true)
     public String resolveUrl(String code) {
-        ShortenedUrl url = urlRepository.findByCode(code)
-                .orElseThrow(() -> new UrlNotFoundException(code));
+        Timer.Sample sample = Timer.start(meterRegistry);
+        boolean cacheHit = false;
+        try {
+            Cache cache = cacheManager.getCache(CACHE_NAME);
+            if (cache != null) {
+                Cache.ValueWrapper cached = cache.get(code);
+                if (cached != null) {
+                    cacheHit = true;
+                    return (String) cached.get();
+                }
+            }
 
-        if (url.getExpiresAt() != null && url.getExpiresAt().isBefore(Instant.now())) {
-            throw new UrlExpiredException(code);
+            ShortenedUrl url = urlRepository.findByCode(code)
+                    .orElseThrow(() -> {
+                        meterRegistry.counter("url.not_found").increment();
+                        return new UrlNotFoundException(code);
+                    });
+
+            if (url.getExpiresAt() != null && url.getExpiresAt().isBefore(Instant.now())) {
+                meterRegistry.counter("url.expired").increment();
+                throw new UrlExpiredException(code);
+            }
+
+            if (cache != null) {
+                cache.put(code, url.getLongUrl());
+            }
+
+            log.info("url_resolved code={} cacheHit=false", code);
+            return url.getLongUrl();
+
+        } finally {
+            sample.stop(Timer.builder("url.redirect")
+                    .tag("cache_hit", String.valueOf(cacheHit))
+                    .publishPercentiles(0.5, 0.95, 0.99)
+                    .register(meterRegistry));
         }
+    }
 
-        log.info("url_resolved code={}", code);
-        return url.getLongUrl();
+    /**
+     * Increment the click counter for a short code.
+     * Separate @Transactional (write) so it always routes to the primary DataSource,
+     * even when resolveUrl() was served from Redis cache.
+     */
+    @Transactional
+    public void incrementClickCount(String code) {
+        urlRepository.incrementClickCount(code);
     }
 
     /**
      * Return click statistics for a short code.
-     *
-     * @param code the short code
-     * @return stats including click count and creation time
-     * @throws UrlNotFoundException if code does not exist
      */
     @Transactional(readOnly = true)
     public StatsResponse getStats(String code) {
@@ -112,18 +150,6 @@ public class UrlService {
                 .clickCount(url.getClickCount())
                 .createdAt(url.getCreatedAt())
                 .build();
-    }
-
-    /**
-     * Increment the click counter for a short code.
-     * Runs as a write transaction — routes to the primary DataSource.
-     * Called separately from resolveUrl so it always fires, even on cache hits.
-     *
-     * @param code the short code that was resolved
-     */
-    @Transactional
-    public void incrementClickCount(String code) {
-        urlRepository.incrementClickCount(code);
     }
 
     // ---- private helpers -------------------------------------------------
