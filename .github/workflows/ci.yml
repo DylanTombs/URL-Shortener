@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # ── Job 1: Build & Test ────────────────────────────────────────────────────
+  # Runs on every push and every PR. Docker is pre-installed on ubuntu-latest
+  # so Testcontainers auto-detects /var/run/docker.sock without any extra config.
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: temurin
+          cache: maven
+
+      - name: Run tests with coverage
+        run: mvn verify
+
+      - name: Upload JaCoCo report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-report
+          path: target/site/jacoco/
+          retention-days: 7
+
+  # ── Job 2: Build & Push Docker Image ──────────────────────────────────────
+  # Only runs on pushes to main (not PRs). Uses OIDC — no long-lived AWS keys.
+  # Tagged by git SHA for exact traceability; also pushes :latest for ECS force-deploy.
+  docker-build-push:
+    name: Build & Push Docker Image
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      id-token: write   # required for OIDC token exchange
+      contents: read
+
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_DEV }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image
+        id: build
+        env:
+          REGISTRY: ${{ secrets.ECR_REGISTRY }}
+          REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          IMAGE=$REGISTRY/$REPOSITORY:$IMAGE_TAG
+          docker build -t $IMAGE .
+          docker tag $IMAGE $REGISTRY/$REPOSITORY:latest
+          docker push $IMAGE
+          docker push $REGISTRY/$REPOSITORY:latest
+          echo "image=$IMAGE" >> $GITHUB_OUTPUT
+
+      # Scan the final layered image — catches CVEs in OS packages and JRE.
+      # exit-code: 1 blocks the pipeline on CRITICAL or HIGH findings.
+      - name: Scan image for vulnerabilities (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.build.outputs.image }}
+          format: table
+          exit-code: '1'
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+  # ── Job 3: Deploy to Dev ───────────────────────────────────────────────────
+  # Rolling deploy via force-new-deployment. ECS replaces tasks one by one,
+  # keeping old tasks alive until health checks pass on the new ones.
+  # aws ecs wait services-stable polls every 15s for up to 10 minutes.
+  deploy-dev:
+    name: Deploy to Dev
+    needs: docker-build-push
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_DEV }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Deploy to ECS (dev)
+        run: |
+          aws ecs update-service \
+            --cluster ${{ secrets.ECS_CLUSTER_DEV }} \
+            --service ${{ secrets.ECS_SERVICE_DEV }} \
+            --force-new-deployment
+
+          aws ecs wait services-stable \
+            --cluster ${{ secrets.ECS_CLUSTER_DEV }} \
+            --services ${{ secrets.ECS_SERVICE_DEV }}
+
+      - name: Validate health
+        run: |
+          curl -sf ${{ secrets.DEV_ALB_URL }}/actuator/health | \
+            jq -e '.status == "UP"'
