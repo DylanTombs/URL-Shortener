@@ -9,6 +9,8 @@ import com.urlshortener.model.ShortenedUrl;
 import com.urlshortener.repository.UrlRepository;
 import com.urlshortener.service.CodeGenerator;
 import com.urlshortener.service.UrlService;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -16,6 +18,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.cache.Cache;
+import org.springframework.cache.CacheManager;
 
 import java.time.Instant;
 import java.util.Optional;
@@ -23,6 +27,9 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -39,11 +46,22 @@ class UrlServiceTest {
     @Mock
     private CodeGenerator codeGenerator;
 
+    @Mock
+    private CacheManager cacheManager;
+
+    // SimpleMeterRegistry is an in-memory registry — no external dependencies needed
+    private final MeterRegistry meterRegistry = new SimpleMeterRegistry();
+
     private UrlService urlService;
 
     @BeforeEach
     void setUp() {
-        urlService = new UrlService(urlRepository, codeGenerator);
+        urlService = new UrlService(urlRepository, codeGenerator, cacheManager, meterRegistry);
+        // Default: cache returns no hit (miss path) so resolveUrl tests hit the DB.
+        // lenient() because shorten/getStats tests don't call resolveUrl() and never touch the cache.
+        Cache cache = mock(Cache.class);
+        lenient().when(cacheManager.getCache("urls")).thenReturn(cache);
+        lenient().when(cache.get(anyString())).thenReturn(null);
     }
 
     // ---- shorten() -------------------------------------------------------
