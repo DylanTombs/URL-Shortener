@@ -62,6 +62,10 @@ class UrlControllerIT {
         registry.add("spring.datasource.url", postgres::getJdbcUrl);
         registry.add("spring.datasource.username", postgres::getUsername);
         registry.add("spring.datasource.password", postgres::getPassword);
+        // Replica points to the same container in tests — no real replica needed
+        registry.add("spring.datasource.replica.url", postgres::getJdbcUrl);
+        registry.add("spring.datasource.replica.username", postgres::getUsername);
+        registry.add("spring.datasource.replica.password", postgres::getPassword);
         registry.add("spring.data.redis.host", redis::getHost);
         registry.add("spring.data.redis.port", () -> redis.getMappedPort(6379));
     }

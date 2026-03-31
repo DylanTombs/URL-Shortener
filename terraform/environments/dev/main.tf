@@ -108,3 +108,13 @@ module "waf" {
   environment = local.environment
   alb_arn     = module.alb.alb_arn
 }
+
+module "github_oidc" {
+  source = "../../modules/github-oidc"
+
+  name               = local.name
+  environment        = local.environment
+  github_repo        = var.github_repo
+  ecr_repository_arn = module.ecs.ecr_repository_arn
+  ecs_role_arns      = module.ecs.iam_role_arns
+}

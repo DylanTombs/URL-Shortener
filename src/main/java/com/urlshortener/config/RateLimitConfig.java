@@ -5,13 +5,14 @@ import io.github.bucket4j.BucketConfiguration;
 import io.github.bucket4j.distributed.proxy.ProxyManager;
 import io.github.bucket4j.redis.lettuce.cas.LettuceBasedProxyManager;
 import io.lettuce.core.RedisClient;
+import io.lettuce.core.RedisURI;
 import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.codec.ByteArrayCodec;
 import io.lettuce.core.codec.RedisCodec;
 import io.lettuce.core.codec.StringCodec;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 
 import java.time.Duration;
 
@@ -27,9 +28,10 @@ import java.time.Duration;
  *   GET /{code}        — 60 requests / minute per IP
  *   POST /api/v1/urls  — 10 requests / minute per IP
  *
- * The ProxyManager stores each bucket in Redis under the key "clientIp:routeKey".
- * A dedicated Lettuce connection (separate channel, shared event loop) is used to
- * avoid interfering with Spring's managed connection pool.
+ * A dedicated RedisClient is created from @Value properties rather than extracting
+ * Spring Data Redis's internal Lettuce client. This avoids lifecycle ordering issues
+ * with LettuceConnectionFactory initialization and keeps the rate-limit connection
+ * independent of the cache connection.
  */
 @Configuration
 public class RateLimitConfig {
@@ -38,15 +40,21 @@ public class RateLimitConfig {
     static final int CREATE_LIMIT = 10;
     static final Duration WINDOW = Duration.ofMinutes(1);
 
+    @Bean(name = "rateLimitRedisClient", destroyMethod = "shutdown")
+    RedisClient rateLimitRedisClient(
+            @Value("${spring.data.redis.host:localhost}") String host,
+            @Value("${spring.data.redis.port:6379}") int port) {
+        return RedisClient.create(RedisURI.builder()
+                .withHost(host)
+                .withPort(port)
+                .withTimeout(Duration.ofSeconds(2))
+                .build());
+    }
+
     @Bean(destroyMethod = "close")
     StatefulRedisConnection<String, byte[]> rateLimitRedisConnection(
-            LettuceConnectionFactory lettuceConnectionFactory) {
-        if (!(lettuceConnectionFactory.getNativeClient() instanceof RedisClient client)) {
-            throw new IllegalStateException(
-                    "Expected standalone RedisClient but got: "
-                    + lettuceConnectionFactory.getNativeClient());
-        }
-        return client.connect(RedisCodec.of(StringCodec.UTF8, ByteArrayCodec.INSTANCE));
+            RedisClient rateLimitRedisClient) {
+        return rateLimitRedisClient.connect(RedisCodec.of(StringCodec.UTF8, ByteArrayCodec.INSTANCE));
     }
 
     @Bean
