@@ -42,6 +42,14 @@ public class GlobalExceptionHandler {
                 .body(new ErrorResponse("INVALID_URL", message));
     }
 
+    // Thrown by UrlService.validateUrl() for URLs that pass @NotBlank but fail
+    // semantic validation (bad scheme, missing host, malformed syntax).
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<ErrorResponse> handleIllegalArgument(IllegalArgumentException ex) {
+        return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
+                .body(new ErrorResponse("INVALID_URL", ex.getMessage()));
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> handleUnexpected(Exception ex) {
         log.error("Unexpected error", ex);
