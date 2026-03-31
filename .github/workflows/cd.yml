@@ -1,0 +1,79 @@
+name: CD — Deploy to Production
+
+# Triggered manually from the GitHub UI or via workflow_call from ci.yml.
+# The `production` GitHub environment requires a reviewer to approve before
+# the deploy-prod job starts — this is the manual gate.
+#
+# One-time setup required:
+#   Repository Settings → Environments → New environment → name: production
+#   Add required reviewers (yourself or team leads)
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Image tag to deploy (git SHA or latest). Always prefer a SHA.'
+        required: true
+        default: latest
+
+jobs:
+  # ── Deploy to Production ──────────────────────────────────────────────────
+  # The `environment: production` line is what blocks this job behind the
+  # required-reviewers gate configured in Repository Settings → Environments.
+  deploy-prod:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write   # required for OIDC token exchange
+      contents: read
+
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_PROD }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Confirm image exists in ECR
+        env:
+          REGISTRY: ${{ secrets.ECR_REGISTRY }}
+          REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          aws ecr describe-images \
+            --repository-name $REPOSITORY \
+            --image-ids imageTag=$IMAGE_TAG \
+            --query 'imageDetails[0].imageTags' \
+            --output text
+
+      - name: Deploy to ECS (prod)
+        run: |
+          aws ecs update-service \
+            --cluster ${{ secrets.ECS_CLUSTER_PROD }} \
+            --service ${{ secrets.ECS_SERVICE_PROD }} \
+            --force-new-deployment
+
+          # Default timeout: 40 polls × 15s = 10 minutes.
+          # Failure here means ECS health checks are not passing — check CloudWatch Logs.
+          aws ecs wait services-stable \
+            --cluster ${{ secrets.ECS_CLUSTER_PROD }} \
+            --services ${{ secrets.ECS_SERVICE_PROD }}
+
+      - name: Validate health
+        run: |
+          curl -sf ${{ secrets.PROD_ALB_URL }}/actuator/health | \
+            jq -e '.status == "UP"'
+
+      - name: Confirm running count matches desired
+        run: |
+          RUNNING=$(aws ecs describe-services \
+            --cluster ${{ secrets.ECS_CLUSTER_PROD }} \
+            --services ${{ secrets.ECS_SERVICE_PROD }} \
+            --query 'services[0].runningCount' \
+            --output text)
+          DESIRED=$(aws ecs describe-services \
+            --cluster ${{ secrets.ECS_CLUSTER_PROD }} \
+            --services ${{ secrets.ECS_SERVICE_PROD }} \
+            --query 'services[0].desiredCount' \
+            --output text)
+          echo "Running: $RUNNING / Desired: $DESIRED"
+          [ "$RUNNING" = "$DESIRED" ]
