@@ -28,3 +28,13 @@ output "rds_secret_arn" {
   value       = module.rds.secret_arn
   sensitive   = true
 }
+
+output "cloudwatch_dashboard" {
+  description = "CloudWatch dashboard name — open in AWS console to view all metrics"
+  value       = module.cloudwatch.dashboard_name
+}
+
+output "alarm_sns_topic_arn" {
+  description = "SNS topic ARN for CloudWatch alarm notifications"
+  value       = module.cloudwatch.sns_topic_arn
+}

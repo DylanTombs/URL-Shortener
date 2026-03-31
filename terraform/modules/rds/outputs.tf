@@ -16,3 +16,8 @@ output "secret_arn" {
 output "db_name" {
   value = var.db_name
 }
+
+output "primary_identifier" {
+  description = "RDS primary instance identifier — used as CloudWatch dimension for AWS/RDS metrics"
+  value       = aws_db_instance.primary.identifier
+}
