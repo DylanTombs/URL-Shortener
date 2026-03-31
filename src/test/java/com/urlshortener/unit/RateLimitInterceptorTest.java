@@ -1,8 +1,8 @@
 package com.urlshortener.unit;
 
 import com.urlshortener.config.RateLimitInterceptor;
-import io.github.bucket4j.Bucket;
 import io.github.bucket4j.ConsumptionProbe;
+import io.github.bucket4j.distributed.BucketProxy;
 import io.github.bucket4j.distributed.proxy.ProxyManager;
 import io.github.bucket4j.distributed.proxy.RemoteBucketBuilder;
 import org.junit.jupiter.api.BeforeEach;
@@ -146,7 +146,7 @@ class RateLimitInterceptorTest {
         ConsumptionProbe probe = mock(ConsumptionProbe.class);
         when(probe.isConsumed()).thenReturn(true);
 
-        Bucket bucket = mock(Bucket.class);
+        BucketProxy bucket = mock(BucketProxy.class);
         when(bucket.tryConsumeAndReturnRemaining(1)).thenReturn(probe);
 
         RemoteBucketBuilder builder = mock(RemoteBucketBuilder.class);
@@ -160,7 +160,7 @@ class RateLimitInterceptorTest {
         when(probe.isConsumed()).thenReturn(false);
         when(probe.getNanosToWaitForRefill()).thenReturn(nanosToWait);
 
-        Bucket bucket = mock(Bucket.class);
+        BucketProxy bucket = mock(BucketProxy.class);
         when(bucket.tryConsumeAndReturnRemaining(1)).thenReturn(probe);
 
         RemoteBucketBuilder builder = mock(RemoteBucketBuilder.class);
