@@ -15,3 +15,8 @@ variable "app_base_url" {
   type        = string
   default     = "https://sho.rt"
 }
+
+variable "github_repo" {
+  description = "GitHub repository in owner/repo format (e.g. myorg/url-shortener)"
+  type        = string
+}

@@ -26,3 +26,13 @@ output "cloudwatch_log_group" {
   description = "CloudWatch log group name for application logs"
   value       = aws_cloudwatch_log_group.app.name
 }
+
+output "ecr_repository_arn" {
+  description = "ECR repository ARN — used by github-oidc module to scope ECR push permissions"
+  value       = aws_ecr_repository.app.arn
+}
+
+output "iam_role_arns" {
+  description = "Execution and task IAM role ARNs — github-oidc module grants iam:PassRole on these"
+  value       = [aws_iam_role.execution.arn, aws_iam_role.task.arn]
+}
