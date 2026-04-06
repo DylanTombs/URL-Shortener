@@ -116,8 +116,8 @@ Two environments: `dev` (single NAT gateway, t3.micro instances, 1–4 tasks) an
 
 Two GitHub Actions workflows:
 
-- **CI** (`ci.yml`) — triggered on every push: build → unit tests → integration tests → Docker build → ECR push → Trivy image scan → rolling deploy to dev
-- **CD** (`cd.yml`) — triggered on release tag: rolling deploy to prod behind a manual approval gate in the `production` GitHub environment
+- **CI** (`ci.yml`) — triggered on every push and pull request: build → unit tests → integration tests (Testcontainers) → JaCoCo coverage gate (80%). No AWS dependency — runs without secrets configured.
+- **CD** (`cd.yml`) — triggered manually via `workflow_dispatch`: Docker build → ECR push → Trivy vulnerability scan → rolling deploy to dev → manual approval gate → rolling deploy to prod. Requires AWS infrastructure to be provisioned via Terraform first.
 
 AWS authentication uses OIDC — no long-lived keys stored in GitHub Secrets.
 
@@ -175,5 +175,7 @@ terraform/
 
 .github/workflows/  ci.yml, cd.yml
 k6/                 smoke.js, load.js, spike.js
-docs/               ARCHITECTURE.md, DECISIONS.md, RUNBOOK.md
+ARCHITECTURE.md     System design, request flows, caching, DB routing, security
+DECISIONS.md        7 architecture decision records with context and tradeoffs
+RUNBOOK.md          Operational procedures — deploy, rollback, scaling, incidents
 ```
