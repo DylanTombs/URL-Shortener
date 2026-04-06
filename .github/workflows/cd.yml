@@ -1,30 +1,129 @@
-name: CD — Deploy to Production
+name: CD — Build, Push & Deploy
 
-# Triggered manually from the GitHub UI or via workflow_call from ci.yml.
-# The `production` GitHub environment requires a reviewer to approve before
-# the deploy-prod job starts — this is the manual gate.
+# Triggered manually from the GitHub UI once AWS infrastructure is provisioned
+# via Terraform. Pass the git SHA of the commit you want to deploy.
+#
+# Flow:
+#   1. build-and-push — builds Docker image, pushes to ECR, runs Trivy scan
+#   2. deploy-dev     — rolling deploy to dev ECS cluster (automatic)
+#   3. deploy-prod    — rolling deploy to prod (requires reviewer approval via
+#                       Repository Settings → Environments → production)
 #
 # One-time setup required:
-#   Repository Settings → Environments → New environment → name: production
-#   Add required reviewers (yourself or team leads)
+#   • Run `terraform apply` in environments/dev and environments/prod
+#   • Add GitHub Secrets: AWS_REGION, AWS_ROLE_ARN_DEV, AWS_ROLE_ARN_PROD,
+#     ECR_REGISTRY, ECR_REPOSITORY, ECS_CLUSTER_DEV, ECS_SERVICE_DEV,
+#     ECS_CLUSTER_PROD, ECS_SERVICE_PROD, DEV_ALB_URL, PROD_ALB_URL
+#   • Create a `production` GitHub Environment with required reviewers
+
 on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: 'Image tag to deploy (git SHA or latest). Always prefer a SHA.'
-        required: true
-        default: latest
+        description: 'Git SHA to build and deploy. Uses HEAD of main if blank.'
+        required: false
+        default: ''
 
 jobs:
-  # ── Deploy to Production ──────────────────────────────────────────────────
+  # ── Job 1: Build & Push Docker Image ────────────────────────────────────────
+  # Uses OIDC — no long-lived AWS keys stored in GitHub.
+  # Tagged by git SHA for exact traceability; also pushes :latest.
+  build_and_push:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required for OIDC token exchange
+      contents: read
+
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+      sha:   ${{ steps.sha.outputs.sha }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve image tag
+        id: sha
+        run: |
+          TAG="${{ inputs.image_tag }}"
+          echo "sha=${TAG:-$GITHUB_SHA}" >> $GITHUB_OUTPUT
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_DEV }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image
+        id: build
+        env:
+          REGISTRY:   ${{ secrets.ECR_REGISTRY }}
+          REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+          IMAGE_TAG:  ${{ steps.sha.outputs.sha }}
+        run: |
+          IMAGE=$REGISTRY/$REPOSITORY:$IMAGE_TAG
+          docker build -t $IMAGE .
+          docker tag $IMAGE $REGISTRY/$REPOSITORY:latest
+          docker push $IMAGE
+          docker push $REGISTRY/$REPOSITORY:latest
+          echo "image=$IMAGE" >> $GITHUB_OUTPUT
+
+      # Scan the final layered image — catches CVEs in OS packages and JRE.
+      # exit-code: 1 blocks the pipeline on CRITICAL or HIGH findings.
+      - name: Scan image for vulnerabilities (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.build.outputs.image }}
+          format: table
+          exit-code: '1'
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+  # ── Job 2: Deploy to Dev ─────────────────────────────────────────────────────
+  # Rolling deploy via force-new-deployment. ECS replaces tasks one by one,
+  # keeping old tasks alive until health checks pass on the new ones.
+  deploy-dev:
+    name: Deploy to Dev
+    needs: build_and_push
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_DEV }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Deploy to ECS (dev)
+        run: |
+          aws ecs update-service \
+            --cluster ${{ secrets.ECS_CLUSTER_DEV }} \
+            --service ${{ secrets.ECS_SERVICE_DEV }} \
+            --force-new-deployment
+
+          aws ecs wait services-stable \
+            --cluster ${{ secrets.ECS_CLUSTER_DEV }} \
+            --services ${{ secrets.ECS_SERVICE_DEV }}
+
+      - name: Validate health
+        run: |
+          curl -sf ${{ secrets.DEV_ALB_URL }}/actuator/health | \
+            jq -e '.status == "UP"'
+
+  # ── Job 3: Deploy to Production ──────────────────────────────────────────────
   # The `environment: production` line is what blocks this job behind the
   # required-reviewers gate configured in Repository Settings → Environments.
   deploy-prod:
     name: Deploy to Production
+    needs: [build_and_push, deploy-dev]
     runs-on: ubuntu-latest
     environment: production
     permissions:
-      id-token: write   # required for OIDC token exchange
+      id-token: write
       contents: read
 
     steps:
@@ -35,9 +134,9 @@ jobs:
 
       - name: Confirm image exists in ECR
         env:
-          REGISTRY: ${{ secrets.ECR_REGISTRY }}
+          REGISTRY:   ${{ secrets.ECR_REGISTRY }}
           REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
-          IMAGE_TAG: ${{ inputs.image_tag }}
+          IMAGE_TAG:  ${{ needs.build_and_push.outputs.sha }}
         run: |
           aws ecr describe-images \
             --repository-name $REPOSITORY \
@@ -52,8 +151,6 @@ jobs:
             --service ${{ secrets.ECS_SERVICE_PROD }} \
             --force-new-deployment
 
-          # Default timeout: 40 polls × 15s = 10 minutes.
-          # Failure here means ECS health checks are not passing — check CloudWatch Logs.
           aws ecs wait services-stable \
             --cluster ${{ secrets.ECS_CLUSTER_PROD }} \
             --services ${{ secrets.ECS_SERVICE_PROD }}
