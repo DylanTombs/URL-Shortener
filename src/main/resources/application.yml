@@ -53,11 +53,20 @@ management:
       enabled: true
     db:
       enabled: true
+  cloudwatch:
+    metrics:
+      export:
+        namespace: UrlShortener
+        step: 60s
+        enabled: ${CLOUDWATCH_METRICS_ENABLED:false}
+  metrics:
+    distribution:
+      percentiles:
+        url.redirect: 0.5,0.95,0.99
+      percentiles-histogram:
+        url.redirect: false
 
 logging:
-  structured:
-    format:
-      console: ecs
   level:
     root: INFO
     com.urlshortener: DEBUG
