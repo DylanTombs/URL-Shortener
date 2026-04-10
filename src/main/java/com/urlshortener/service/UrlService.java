@@ -121,6 +121,7 @@ public class UrlService {
                 Cache.ValueWrapper cached = cache.get(code);
                 if (cached != null) {
                     cacheHit = true;
+                    log.debug("url_resolved code={} cacheHit=true", code);
                     return (String) cached.get();
                 }
             }

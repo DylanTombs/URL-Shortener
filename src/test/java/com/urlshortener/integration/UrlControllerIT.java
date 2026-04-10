@@ -1,5 +1,6 @@
 package com.urlshortener.integration;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.redis.testcontainers.RedisContainer;
 import com.urlshortener.model.ShortenedUrl;
 import com.urlshortener.repository.UrlRepository;
@@ -74,6 +75,7 @@ class UrlControllerIT {
     @Autowired UrlRepository urlRepository;
     @Autowired CacheManager cacheManager;
     @Autowired StringRedisTemplate stringRedisTemplate;
+    @Autowired ObjectMapper objectMapper;
 
     @BeforeEach
     void cleanState() {
@@ -297,9 +299,7 @@ class UrlControllerIT {
 
     // ---- helpers ---------------------------------------------------------
 
-    private static String extractCode(String json) {
-        int start = json.indexOf("\"code\":\"") + 8;
-        int end = json.indexOf('"', start);
-        return json.substring(start, end);
+    private String extractCode(String json) throws Exception {
+        return objectMapper.readTree(json).get("code").asText();
     }
 }
