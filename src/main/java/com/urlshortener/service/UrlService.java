@@ -13,14 +13,15 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.cache.Cache;
 import org.springframework.cache.CacheManager;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
-import java.util.Objects;
 
 /**
  * Core business logic for creating and resolving short URLs.
@@ -44,11 +45,17 @@ public class UrlService {
 
     private static final int MAX_COLLISION_RETRIES = 5;
     private static final String CACHE_NAME = "urls";
+    // Spring Cache key prefix for the "urls" cache — must match RedisConfig's key convention.
+    private static final String CACHE_KEY_PREFIX = CACHE_NAME + "::";
+    private static final Duration MAX_CACHE_TTL = Duration.ofHours(24);
 
     private final UrlRepository urlRepository;
     private final CodeGenerator codeGenerator;
     private final CacheManager cacheManager;
     private final MeterRegistry meterRegistry;
+    // Used for per-entry TTL writes. CacheManager uses the default 24h TTL and
+    // does not expose per-entry TTL control, so we write via StringRedisTemplate directly.
+    private final StringRedisTemplate stringRedisTemplate;
 
     /**
      * Create a new shortened URL.
@@ -69,7 +76,7 @@ public class UrlService {
                 .expiresAt(expiresAt)
                 .clickCount(0)
                 .build();
-        ShortenedUrl saved = urlRepository.save(Objects.requireNonNull(entity));
+        ShortenedUrl saved = urlRepository.save(entity);
 
         meterRegistry.counter("url.created").increment();
         log.info("url_shortened code={} ttlDays={}", saved.getCode(), request.ttlDays());
@@ -112,9 +119,12 @@ public class UrlService {
                 throw new UrlExpiredException(code);
             }
 
-            if (cache != null) {
-                cache.put(code, url.getLongUrl());
-            }
+            // Write with per-entry TTL: min(24h, time remaining until expiry).
+            // Spring Cache's cache.put() always applies the default 24h TTL from RedisConfig,
+            // which would allow serving a stale redirect after the link expires.
+            // StringRedisTemplate.setex() gives us control over the exact TTL.
+            Duration ttl = computeCacheTtl(url.getExpiresAt());
+            stringRedisTemplate.opsForValue().set(CACHE_KEY_PREFIX + code, url.getLongUrl(), ttl);
 
             log.info("url_resolved code={} cacheHit=false", code);
             return url.getLongUrl();
@@ -153,6 +163,23 @@ public class UrlService {
     }
 
     // ---- private helpers -------------------------------------------------
+
+    /**
+     * Returns the Redis TTL for a cache entry: min(24h, time remaining until expiry).
+     * Never returns zero or negative — a non-positive duration would cause an immediate
+     * eviction, which is correct but would also mean we just loaded the URL from DB only
+     * to have it expire; the expiry check above already handles this case.
+     */
+    public static Duration computeCacheTtl(Instant expiresAt) {
+        if (expiresAt == null) {
+            return MAX_CACHE_TTL;
+        }
+        Duration remaining = Duration.between(Instant.now(), expiresAt);
+        if (remaining.isNegative() || remaining.isZero()) {
+            return Duration.ofSeconds(1); // minimum TTL; expiry check above throws before this matters
+        }
+        return remaining.compareTo(MAX_CACHE_TTL) < 0 ? remaining : MAX_CACHE_TTL;
+    }
 
     private void validateUrl(String url) {
         try {

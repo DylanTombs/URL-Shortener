@@ -20,7 +20,10 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.cache.Cache;
 import org.springframework.cache.CacheManager;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
 
@@ -28,6 +31,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -49,6 +53,9 @@ class UrlServiceTest {
     @Mock
     private CacheManager cacheManager;
 
+    @Mock
+    private StringRedisTemplate stringRedisTemplate;
+
     // SimpleMeterRegistry is an in-memory registry — no external dependencies needed
     private final MeterRegistry meterRegistry = new SimpleMeterRegistry();
 
@@ -56,12 +63,16 @@ class UrlServiceTest {
 
     @BeforeEach
     void setUp() {
-        urlService = new UrlService(urlRepository, codeGenerator, cacheManager, meterRegistry);
+        urlService = new UrlService(urlRepository, codeGenerator, cacheManager, meterRegistry, stringRedisTemplate);
         // Default: cache returns no hit (miss path) so resolveUrl tests hit the DB.
         // lenient() because shorten/getStats tests don't call resolveUrl() and never touch the cache.
         Cache cache = mock(Cache.class);
         lenient().when(cacheManager.getCache("urls")).thenReturn(cache);
         lenient().when(cache.get(anyString())).thenReturn(null);
+        // Default: stub ValueOperations so resolveUrl cache-miss path doesn't NPE on the set() call.
+        @SuppressWarnings("unchecked")
+        ValueOperations<String, String> valueOps = mock(ValueOperations.class);
+        lenient().when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
     }
 
     // ---- shorten() -------------------------------------------------------
@@ -219,6 +230,68 @@ class UrlServiceTest {
         when(urlRepository.findByCode(CODE)).thenReturn(Optional.of(url));
 
         assertThat(urlService.resolveUrl(CODE)).isEqualTo("https://example.com");
+    }
+
+    @Test
+    @DisplayName("resolveUrl: URL with no expiry is cached with 24h TTL")
+    void resolveUrl_noExpiry_cachedWith24hTtl() {
+        ShortenedUrl url = ShortenedUrl.builder()
+                .code(CODE).longUrl("https://example.com")
+                .createdAt(Instant.now()).expiresAt(null).clickCount(0).build();
+        when(urlRepository.findByCode(CODE)).thenReturn(Optional.of(url));
+
+        @SuppressWarnings("unchecked")
+        ValueOperations<String, String> valueOps = mock(ValueOperations.class);
+        when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+
+        urlService.resolveUrl(CODE);
+
+        ArgumentCaptor<Duration> ttlCaptor = ArgumentCaptor.forClass(Duration.class);
+        verify(valueOps).set(eq("urls::" + CODE), eq("https://example.com"), ttlCaptor.capture());
+        assertThat(ttlCaptor.getValue()).isEqualTo(Duration.ofHours(24));
+    }
+
+    @Test
+    @DisplayName("resolveUrl: URL expiring in 5 minutes is cached with ~5m TTL, not 24h")
+    void resolveUrl_shortExpiry_cachedWithShortTtl() {
+        Instant expiresAt = Instant.now().plusSeconds(300);
+        ShortenedUrl url = ShortenedUrl.builder()
+                .code(CODE).longUrl("https://example.com")
+                .createdAt(Instant.now()).expiresAt(expiresAt).clickCount(0).build();
+        when(urlRepository.findByCode(CODE)).thenReturn(Optional.of(url));
+
+        @SuppressWarnings("unchecked")
+        ValueOperations<String, String> valueOps = mock(ValueOperations.class);
+        when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+
+        urlService.resolveUrl(CODE);
+
+        ArgumentCaptor<Duration> ttlCaptor = ArgumentCaptor.forClass(Duration.class);
+        verify(valueOps).set(eq("urls::" + CODE), eq("https://example.com"), ttlCaptor.capture());
+        // TTL must be well under 24 hours — approximately 5 minutes
+        assertThat(ttlCaptor.getValue()).isLessThan(Duration.ofMinutes(6));
+        assertThat(ttlCaptor.getValue()).isGreaterThan(Duration.ofMinutes(4));
+    }
+
+    @Test
+    @DisplayName("computeCacheTtl: null expiry returns 24h")
+    void computeCacheTtl_nullExpiry_returns24h() {
+        assertThat(UrlService.computeCacheTtl(null)).isEqualTo(Duration.ofHours(24));
+    }
+
+    @Test
+    @DisplayName("computeCacheTtl: expiry further than 24h returns 24h")
+    void computeCacheTtl_farFutureExpiry_returns24h() {
+        assertThat(UrlService.computeCacheTtl(Instant.now().plus(Duration.ofDays(7))))
+                .isEqualTo(Duration.ofHours(24));
+    }
+
+    @Test
+    @DisplayName("computeCacheTtl: expiry in 1 hour returns ~1h TTL")
+    void computeCacheTtl_oneHourExpiry_returnsOneHour() {
+        Duration ttl = UrlService.computeCacheTtl(Instant.now().plusSeconds(3600));
+        assertThat(ttl).isLessThanOrEqualTo(Duration.ofHours(1));
+        assertThat(ttl).isGreaterThan(Duration.ofMinutes(59));
     }
 
     // ---- getStats() ------------------------------------------------------
