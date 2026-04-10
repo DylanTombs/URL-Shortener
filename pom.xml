@@ -92,6 +92,15 @@
             <artifactId>micrometer-registry-cloudwatch2</artifactId>
         </dependency>
 
+        <!-- Logstash Logback Encoder — proper JSON logging with correct escaping.
+             PatternLayoutEncoder-based JSON breaks on messages containing quotes,
+             backslashes, or newlines (e.g. exception stack traces). -->
+        <dependency>
+            <groupId>net.logstash.logback</groupId>
+            <artifactId>logstash-logback-encoder</artifactId>
+            <version>8.0</version>
+        </dependency>
+
         <!-- ===== TEST ===== -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

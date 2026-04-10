@@ -1,23 +1,31 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Structured JSON logging for all environments.
+  Structured JSON logging using logstash-logback-encoder.
 
-  Spring Boot's built-in ECS encoder (logging.structured.format.console=ecs set in
-  application.yml) produces JSON but places MDC keys in an "labels" sub-object.
-  This configuration ensures traceId appears as a top-level JSON field so
-  CloudWatch Logs Insights can filter on it directly:
+  PatternLayoutEncoder-based JSON breaks when log messages contain double-quotes,
+  backslashes, newlines, or control characters (e.g. exception stack traces or
+  URLs with query strings). LogstashEncoder correctly escapes all values.
+
+  The traceId MDC key is promoted to a top-level JSON field via <includeMdcKeyName>
+  so CloudWatch Logs Insights can filter directly:
     fields traceId | filter traceId = "abc-123"
-
-  The encoder used here is Spring Boot 3.4's native StructuredLogFormatter with
-  the ECS format, which maps MDC entries to top-level fields automatically when
-  referenced via the <mdcField> element.
 -->
 <configuration>
 
   <springProfile name="!test">
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
-      <encoder class="ch.qos.logback.classic.encoder.PatternLayoutEncoder">
-        <pattern>{"@timestamp":"%d{yyyy-MM-dd'T'HH:mm:ss.SSSZ}","log.level":"%level","traceId":"%X{traceId:-none}","log.logger":"%logger","message":"%message","thread":"%thread"}%n</pattern>
+      <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+        <includeMdcKeyName>traceId</includeMdcKeyName>
+        <!-- Remove the default "tags" array — unused and adds noise -->
+        <excludeProvider class="net.logstash.logback.composite.loggingevent.TagsJsonProvider"/>
+        <fieldNames>
+          <timestamp>@timestamp</timestamp>
+          <level>log.level</level>
+          <logger>log.logger</logger>
+          <thread>thread</thread>
+          <message>message</message>
+          <stackTrace>error.stack_trace</stackTrace>
+        </fieldNames>
       </encoder>
     </appender>
 
