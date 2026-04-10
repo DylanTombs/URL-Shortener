@@ -3,6 +3,7 @@ package com.urlshortener.service;
 import com.urlshortener.dto.ShortenRequest;
 import com.urlshortener.dto.ShortenResponse;
 import com.urlshortener.dto.StatsResponse;
+import com.urlshortener.exception.InvalidUrlException;
 import com.urlshortener.exception.UrlExpiredException;
 import com.urlshortener.exception.UrlNotFoundException;
 import com.urlshortener.model.ShortenedUrl;
@@ -201,13 +202,13 @@ public class UrlService {
         try {
             URI uri = new URI(url);
             if (uri.getScheme() == null || uri.getHost() == null) {
-                throw new IllegalArgumentException("Invalid URL: missing scheme or host: " + url);
+                throw new InvalidUrlException("Invalid URL: missing scheme or host: " + url);
             }
             if (!uri.getScheme().equals("http") && !uri.getScheme().equals("https")) {
-                throw new IllegalArgumentException("Invalid URL: scheme must be http or https: " + url);
+                throw new InvalidUrlException("Invalid URL: scheme must be http or https: " + url);
             }
         } catch (URISyntaxException e) {
-            throw new IllegalArgumentException("Invalid URL: " + url, e);
+            throw new InvalidUrlException("Invalid URL: " + url, e);
         }
     }
 

@@ -1,6 +1,7 @@
 package com.urlshortener.controller;
 
 import com.urlshortener.dto.ErrorResponse;
+import com.urlshortener.exception.InvalidUrlException;
 import com.urlshortener.exception.UrlExpiredException;
 import com.urlshortener.exception.UrlNotFoundException;
 import lombok.extern.slf4j.Slf4j;
@@ -44,8 +45,10 @@ public class GlobalExceptionHandler {
 
     // Thrown by UrlService.validateUrl() for URLs that pass @NotBlank but fail
     // semantic validation (bad scheme, missing host, malformed syntax).
-    @ExceptionHandler(IllegalArgumentException.class)
-    public ResponseEntity<ErrorResponse> handleIllegalArgument(IllegalArgumentException ex) {
+    // Using a dedicated exception rather than IllegalArgumentException prevents
+    // framework-thrown IllegalArgumentExceptions from becoming spurious 422s.
+    @ExceptionHandler(InvalidUrlException.class)
+    public ResponseEntity<ErrorResponse> handleInvalidUrl(InvalidUrlException ex) {
         return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
                 .body(new ErrorResponse("INVALID_URL", ex.getMessage()));
     }

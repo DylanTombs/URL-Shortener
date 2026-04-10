@@ -3,6 +3,7 @@ package com.urlshortener.unit;
 import com.urlshortener.dto.ShortenRequest;
 import com.urlshortener.dto.ShortenResponse;
 import com.urlshortener.dto.StatsResponse;
+import com.urlshortener.exception.InvalidUrlException;
 import com.urlshortener.exception.UrlExpiredException;
 import com.urlshortener.exception.UrlNotFoundException;
 import com.urlshortener.model.ShortenedUrl;
@@ -96,11 +97,11 @@ class UrlServiceTest {
     }
 
     @Test
-    @DisplayName("shorten: invalid URL throws IllegalArgumentException")
+    @DisplayName("shorten: invalid URL throws InvalidUrlException")
     void shorten_invalidUrl_throwsException() {
         assertThatThrownBy(() ->
                 urlService.shorten(new ShortenRequest("not-a-url", null), BASE_URL))
-                .isInstanceOf(IllegalArgumentException.class);
+                .isInstanceOf(InvalidUrlException.class);
     }
 
     @Test
