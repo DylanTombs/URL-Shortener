@@ -29,6 +29,8 @@ import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import org.springframework.dao.DataIntegrityViolationException;
+
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -132,6 +134,24 @@ class UrlServiceTest {
                 BASE_URL);
 
         assertThat(response.expiresAt()).isNull();
+    }
+
+    @Test
+    @DisplayName("shorten: concurrent DataIntegrityViolationException retries and succeeds")
+    void shorten_concurrentCollision_retriesOnConstraintViolation() {
+        String firstCode = "aaaaaaaa";
+        String secondCode = "bbbbbbbb";
+        when(codeGenerator.generate()).thenReturn(firstCode, secondCode);
+        when(urlRepository.existsByCode(anyString())).thenReturn(false);
+        // First save loses the race — DB unique constraint fires
+        when(urlRepository.save(any()))
+                .thenThrow(new DataIntegrityViolationException("duplicate key"))
+                .thenAnswer(inv -> inv.getArgument(0));
+
+        ShortenResponse response = urlService.shorten(
+                new ShortenRequest("https://www.example.com", null), BASE_URL);
+
+        assertThat(response.code()).isEqualTo(secondCode);
     }
 
     @Test

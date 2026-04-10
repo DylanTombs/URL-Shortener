@@ -13,6 +13,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.cache.Cache;
 import org.springframework.cache.CacheManager;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -59,33 +60,48 @@ public class UrlService {
 
     /**
      * Create a new shortened URL.
+     *
+     * The existsByCode + save sequence is not atomic: two concurrent requests can both
+     * pass the existsByCode check for the same code and race to save. The UNIQUE constraint
+     * on the DB catches the loser and throws DataIntegrityViolationException. We catch it
+     * and retry with a new code, exactly as we do for the pre-check collision path.
      */
     @Transactional
     public ShortenResponse shorten(ShortenRequest request, String baseUrl) {
         validateUrl(request.url());
 
-        String code = generateUniqueCode();
         Instant expiresAt = request.ttlDays() != null
                 ? Instant.now().plus(request.ttlDays(), ChronoUnit.DAYS)
                 : null;
 
-        ShortenedUrl entity = ShortenedUrl.builder()
-                .code(code)
-                .longUrl(request.url())
-                .createdAt(Instant.now())
-                .expiresAt(expiresAt)
-                .clickCount(0)
-                .build();
-        ShortenedUrl saved = urlRepository.save(entity);
-
-        meterRegistry.counter("url.created").increment();
-        log.info("url_shortened code={} ttlDays={}", saved.getCode(), request.ttlDays());
-
-        return ShortenResponse.builder()
-                .code(saved.getCode())
-                .shortUrl(baseUrl + "/" + saved.getCode())
-                .expiresAt(saved.getExpiresAt())
-                .build();
+        for (int attempt = 1; attempt <= MAX_COLLISION_RETRIES; attempt++) {
+            String code = codeGenerator.generate();
+            if (urlRepository.existsByCode(code)) {
+                log.warn("code_collision attempt={} code={}", attempt, code);
+                continue;
+            }
+            try {
+                ShortenedUrl saved = urlRepository.save(ShortenedUrl.builder()
+                        .code(code)
+                        .longUrl(request.url())
+                        .createdAt(Instant.now())
+                        .expiresAt(expiresAt)
+                        .clickCount(0)
+                        .build());
+                meterRegistry.counter("url.created").increment();
+                log.info("url_shortened code={} ttlDays={}", saved.getCode(), request.ttlDays());
+                return ShortenResponse.builder()
+                        .code(saved.getCode())
+                        .shortUrl(baseUrl + "/" + saved.getCode())
+                        .expiresAt(saved.getExpiresAt())
+                        .build();
+            } catch (DataIntegrityViolationException e) {
+                // Concurrent insert won the race on the same code — retry with a new one.
+                log.warn("code_collision_concurrent attempt={} code={}", attempt, code);
+            }
+        }
+        throw new IllegalStateException(
+                "Failed to generate unique code after " + MAX_COLLISION_RETRIES + " attempts");
     }
 
     /**
@@ -195,14 +211,4 @@ public class UrlService {
         }
     }
 
-    private String generateUniqueCode() {
-        for (int attempt = 1; attempt <= MAX_COLLISION_RETRIES; attempt++) {
-            String code = codeGenerator.generate();
-            if (!urlRepository.existsByCode(code)) {
-                return code;
-            }
-            log.warn("code_collision attempt={} code={}", attempt, code);
-        }
-        throw new IllegalStateException("Failed to generate unique code after " + MAX_COLLISION_RETRIES + " attempts");
-    }
 }
