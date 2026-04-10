@@ -179,14 +179,29 @@ All endpoints, unit + integration tests (Testcontainers), JaCoCo 80% gate.
 - [ ] Wire cloudwatch module into dev and prod environment Terraform
 - [ ] See `docs/phase4.md` for full observability design
 
-### Phase 5 — Polish and Documentation
-- [ ] Write `k6/smoke.js` (5 VUs, 1 min), `k6/load.js` (50 VUs, 10 min), `k6/spike.js` (500 VUs burst)
-- [ ] Write `ARCHITECTURE.md` (9 sections: overview, diagram, request flows, caching, DB, network, security, ops)
-- [ ] Write `DECISIONS.md` (7 decisions with context/options/consequences/at-10x format)
-- [ ] Write `RUNBOOK.md` (8 operational scenarios, all commands copy-pasteable)
-- [ ] Update `README.md` — local setup under 10 minutes from fresh clone
-- [ ] Run all k6 tests; confirm all thresholds pass
-- [ ] See `docs/phase5.md` for full verification checklist
+### Phase 5 — Polish and Documentation ✅ COMPLETE
+k6 load tests (smoke/load/spike), ARCHITECTURE.md, DECISIONS.md, RUNBOOK.md, README updated.
+
+### Phase 6 — Code Quality & Correctness (Current Phase)
+Fixes from FAANG-level review. Four correctness bugs, four quality issues.
+
+**Correctness (fix first):**
+- [ ] 6.1 Implement `min(24h, time-to-expiry)` cache TTL in `UrlService.resolveUrl()` — docs promise this, code doesn't do it
+- [ ] 6.2 Catch `DataIntegrityViolationException` in `shorten()` — concurrent inserts currently 500
+- [ ] 6.3 Replace `IllegalArgumentException` handler with custom `InvalidUrlException` — too broad, catches framework internals
+- [ ] 6.4 Fix JSON logging — replace pattern-string JSON with `logstash-logback-encoder` (quotes/newlines break current output)
+
+**Quality:**
+- [ ] 6.5 Use `StringRedisSerializer` for URL cache values (current: Jackson wraps strings in type metadata)
+- [ ] 6.6 Drop redundant `idx_shortened_urls_code` index — UNIQUE constraint already creates one (`V2__` migration)
+- [ ] 6.7 Add cache-hit log line in `resolveUrl()` — cache-hit redirects currently leave no trace
+- [ ] 6.8 Set `health.show-details: when_authorized` in prod config (currently `always`)
+
+**Minor:**
+- [ ] 6.9 Remove `prometheus` from actuator exposure (no scraper exists)
+- [ ] 6.10 Replace string-index `extractCode()` in `UrlControllerIT` with `ObjectMapper`
+- [ ] 6.11 Add `@EnableCaching` to `RedisConfig`
+- [ ] See `docs/phase6.md` for full implementation details
 
 ---
 
