@@ -1,0 +1,10 @@
+# Development profile overrides.
+# Applied when SPRING_PROFILES_ACTIVE=dev (set by ECS task in dev environment)
+# or when running locally with -Dspring.profiles.active=dev.
+
+management:
+  endpoint:
+    health:
+      # Full detail locally — useful for debugging datasource/Redis connectivity.
+      # Production uses when_authorized (set in application.yml).
+      show-details: always

@@ -3,6 +3,7 @@ package com.urlshortener.service;
 import com.urlshortener.dto.ShortenRequest;
 import com.urlshortener.dto.ShortenResponse;
 import com.urlshortener.dto.StatsResponse;
+import com.urlshortener.exception.InvalidUrlException;
 import com.urlshortener.exception.UrlExpiredException;
 import com.urlshortener.exception.UrlNotFoundException;
 import com.urlshortener.model.ShortenedUrl;
@@ -13,14 +14,16 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.cache.Cache;
 import org.springframework.cache.CacheManager;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
-import java.util.Objects;
 
 /**
  * Core business logic for creating and resolving short URLs.
@@ -44,41 +47,71 @@ public class UrlService {
 
     private static final int MAX_COLLISION_RETRIES = 5;
     private static final String CACHE_NAME = "urls";
+    // Spring Cache key prefix for the "urls" cache — must match RedisConfig's key convention.
+    private static final String CACHE_KEY_PREFIX = CACHE_NAME + "::";
+    private static final Duration MAX_CACHE_TTL = Duration.ofHours(24);
 
     private final UrlRepository urlRepository;
     private final CodeGenerator codeGenerator;
     private final CacheManager cacheManager;
     private final MeterRegistry meterRegistry;
+    // Used for per-entry TTL writes. CacheManager uses the default 24h TTL and
+    // does not expose per-entry TTL control, so we write via ValueOperations directly.
+    // ValueOperations is an interface — straightforward to mock in unit tests without
+    // the inline-mock restrictions that apply to the concrete StringRedisTemplate class.
+    private final ValueOperations<String, String> redisValueOps;
 
     /**
      * Create a new shortened URL.
+     *
+     * Not annotated @Transactional deliberately. The only write is urlRepository.save(),
+     * which carries its own repository-level @Transactional. Each save attempt therefore
+     * runs in its own independent transaction.
+     *
+     * If shorten() were @Transactional, a DataIntegrityViolationException from save()
+     * would cause Spring to mark the outer transaction rollback-only before the exception
+     * reaches the catch block. Catching it and retrying would then throw
+     * UnexpectedRollbackException on the next DB call — worse than the original 500.
+     *
+     * Without the outer transaction, catching DataIntegrityViolationException is safe:
+     * each save() attempt is self-contained, and the constraint violation rolls back only
+     * that attempt's transaction, leaving the method free to retry.
      */
-    @Transactional
     public ShortenResponse shorten(ShortenRequest request, String baseUrl) {
         validateUrl(request.url());
 
-        String code = generateUniqueCode();
         Instant expiresAt = request.ttlDays() != null
                 ? Instant.now().plus(request.ttlDays(), ChronoUnit.DAYS)
                 : null;
 
-        ShortenedUrl entity = ShortenedUrl.builder()
-                .code(code)
-                .longUrl(request.url())
-                .createdAt(Instant.now())
-                .expiresAt(expiresAt)
-                .clickCount(0)
-                .build();
-        ShortenedUrl saved = urlRepository.save(Objects.requireNonNull(entity));
-
-        meterRegistry.counter("url.created").increment();
-        log.info("url_shortened code={} ttlDays={}", saved.getCode(), request.ttlDays());
-
-        return ShortenResponse.builder()
-                .code(saved.getCode())
-                .shortUrl(baseUrl + "/" + saved.getCode())
-                .expiresAt(saved.getExpiresAt())
-                .build();
+        for (int attempt = 1; attempt <= MAX_COLLISION_RETRIES; attempt++) {
+            String code = codeGenerator.generate();
+            if (urlRepository.existsByCode(code)) {
+                log.warn("code_collision attempt={} code={}", attempt, code);
+                continue;
+            }
+            try {
+                ShortenedUrl saved = urlRepository.save(ShortenedUrl.builder()
+                        .code(code)
+                        .longUrl(request.url())
+                        .createdAt(Instant.now())
+                        .expiresAt(expiresAt)
+                        .clickCount(0)
+                        .build());
+                meterRegistry.counter("url.created").increment();
+                log.info("url_shortened code={} ttlDays={}", saved.getCode(), request.ttlDays());
+                return ShortenResponse.builder()
+                        .code(saved.getCode())
+                        .shortUrl(baseUrl + "/" + saved.getCode())
+                        .expiresAt(saved.getExpiresAt())
+                        .build();
+            } catch (DataIntegrityViolationException e) {
+                // Concurrent insert won the race on the same code — retry with a new one.
+                log.warn("code_collision_concurrent attempt={} code={}", attempt, code);
+            }
+        }
+        throw new IllegalStateException(
+                "Failed to generate unique code after " + MAX_COLLISION_RETRIES + " attempts");
     }
 
     /**
@@ -97,6 +130,7 @@ public class UrlService {
                 Cache.ValueWrapper cached = cache.get(code);
                 if (cached != null) {
                     cacheHit = true;
+                    log.debug("url_resolved code={} cacheHit=true", code);
                     return (String) cached.get();
                 }
             }
@@ -112,9 +146,12 @@ public class UrlService {
                 throw new UrlExpiredException(code);
             }
 
-            if (cache != null) {
-                cache.put(code, url.getLongUrl());
-            }
+            // Write with per-entry TTL: min(24h, time remaining until expiry).
+            // Spring Cache's cache.put() always applies the default 24h TTL from RedisConfig,
+            // which would allow serving a stale redirect after the link expires.
+            // StringRedisTemplate.setex() gives us control over the exact TTL.
+            Duration ttl = computeCacheTtl(url.getExpiresAt());
+            redisValueOps.set(CACHE_KEY_PREFIX + code, url.getLongUrl(), ttl);
 
             log.info("url_resolved code={} cacheHit=false", code);
             return url.getLongUrl();
@@ -154,28 +191,35 @@ public class UrlService {
 
     // ---- private helpers -------------------------------------------------
 
+    /**
+     * Returns the Redis TTL for a cache entry: min(24h, time remaining until expiry).
+     * Never returns zero or negative — a non-positive duration would cause an immediate
+     * eviction, which is correct but would also mean we just loaded the URL from DB only
+     * to have it expire; the expiry check above already handles this case.
+     */
+    public static Duration computeCacheTtl(Instant expiresAt) {
+        if (expiresAt == null) {
+            return MAX_CACHE_TTL;
+        }
+        Duration remaining = Duration.between(Instant.now(), expiresAt);
+        if (remaining.isNegative() || remaining.isZero()) {
+            return Duration.ofSeconds(1); // minimum TTL; expiry check above throws before this matters
+        }
+        return remaining.compareTo(MAX_CACHE_TTL) < 0 ? remaining : MAX_CACHE_TTL;
+    }
+
     private void validateUrl(String url) {
         try {
             URI uri = new URI(url);
             if (uri.getScheme() == null || uri.getHost() == null) {
-                throw new IllegalArgumentException("Invalid URL: missing scheme or host: " + url);
+                throw new InvalidUrlException("Invalid URL: missing scheme or host: " + url);
             }
             if (!uri.getScheme().equals("http") && !uri.getScheme().equals("https")) {
-                throw new IllegalArgumentException("Invalid URL: scheme must be http or https: " + url);
+                throw new InvalidUrlException("Invalid URL: scheme must be http or https: " + url);
             }
         } catch (URISyntaxException e) {
-            throw new IllegalArgumentException("Invalid URL: " + url, e);
+            throw new InvalidUrlException("Invalid URL: " + url, e);
         }
     }
 
-    private String generateUniqueCode() {
-        for (int attempt = 1; attempt <= MAX_COLLISION_RETRIES; attempt++) {
-            String code = codeGenerator.generate();
-            if (!urlRepository.existsByCode(code)) {
-                return code;
-            }
-            log.warn("code_collision attempt={} code={}", attempt, code);
-        }
-        throw new IllegalStateException("Failed to generate unique code after " + MAX_COLLISION_RETRIES + " attempts");
-    }
 }

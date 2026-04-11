@@ -1,8 +1,10 @@
 package com.urlshortener.controller;
 
 import com.urlshortener.dto.ErrorResponse;
+import com.urlshortener.exception.InvalidUrlException;
 import com.urlshortener.exception.UrlExpiredException;
 import com.urlshortener.exception.UrlNotFoundException;
+import jakarta.validation.ConstraintViolationException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -44,10 +46,25 @@ public class GlobalExceptionHandler {
 
     // Thrown by UrlService.validateUrl() for URLs that pass @NotBlank but fail
     // semantic validation (bad scheme, missing host, malformed syntax).
-    @ExceptionHandler(IllegalArgumentException.class)
-    public ResponseEntity<ErrorResponse> handleIllegalArgument(IllegalArgumentException ex) {
+    // Using a dedicated exception rather than IllegalArgumentException prevents
+    // framework-thrown IllegalArgumentExceptions from becoming spurious 422s.
+    @ExceptionHandler(InvalidUrlException.class)
+    public ResponseEntity<ErrorResponse> handleInvalidUrl(InvalidUrlException ex) {
         return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
                 .body(new ErrorResponse("INVALID_URL", ex.getMessage()));
+    }
+
+    // Thrown by @Validated path variable constraints (@Size, @Pattern on @PathVariable).
+    // MethodArgumentNotValidException covers @RequestBody; ConstraintViolationException
+    // covers method-level constraints on path variables and request parameters.
+    @ExceptionHandler(ConstraintViolationException.class)
+    public ResponseEntity<ErrorResponse> handleConstraintViolation(ConstraintViolationException ex) {
+        String message = ex.getConstraintViolations().stream()
+                .map(cv -> cv.getPropertyPath() + ": " + cv.getMessage())
+                .findFirst()
+                .orElse("Invalid request parameter");
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(new ErrorResponse("INVALID_CODE", message));
     }
 
     @ExceptionHandler(Exception.class)

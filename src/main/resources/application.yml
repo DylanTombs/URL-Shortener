@@ -44,10 +44,15 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics,prometheus
+        # prometheus excluded — no scraper configured; CloudWatch is the metrics backend.
+        # Add it back (with authentication) if Prometheus/Grafana is introduced.
+        include: health,info,metrics
   endpoint:
     health:
-      show-details: always
+      # when_authorized: full detail only to authenticated callers.
+      # Prevents exposing pool state, Redis/DB connection info to unauthenticated requests.
+      # Override to 'always' in application-dev.yml for local debugging.
+      show-details: when_authorized
   health:
     redis:
       enabled: true
