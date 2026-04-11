@@ -152,8 +152,8 @@ class UrlControllerIT {
     // ---- GET /{code} -----------------------------------------------------
 
     @Test
-    @DisplayName("GET /{code}: known code returns 301 with Location header")
-    void redirect_knownCode_returns301() throws Exception {
+    @DisplayName("GET /{code}: known code returns 302 with Location header")
+    void redirect_knownCode_returns302() throws Exception {
         String response = mockMvc.perform(post("/api/v1/urls")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
@@ -165,7 +165,7 @@ class UrlControllerIT {
         String code = extractCode(response);
 
         mockMvc.perform(get("/" + code))
-                .andExpect(status().isMovedPermanently())
+                .andExpect(status().isFound())
                 .andExpect(header().string("Location", "https://www.example.com/redirect-target"));
     }
 
@@ -182,10 +182,10 @@ class UrlControllerIT {
 
         String code = extractCode(response);
 
-        mockMvc.perform(get("/" + code)).andExpect(status().isMovedPermanently());
+        mockMvc.perform(get("/" + code)).andExpect(status().isFound());
 
         mockMvc.perform(get("/" + code))
-                .andExpect(status().isMovedPermanently())
+                .andExpect(status().isFound())
                 .andExpect(header().string("Location", "https://www.example.com/cached"));
     }
 
@@ -205,9 +205,9 @@ class UrlControllerIT {
 
         // Two redirects — second one is served from Redis cache but still increments
         mockMvc.perform(get("/" + code).header("X-Forwarded-For", "10.0.10.1"))
-                .andExpect(status().isMovedPermanently());
+                .andExpect(status().isFound());
         mockMvc.perform(get("/" + code).header("X-Forwarded-For", "10.0.10.1"))
-                .andExpect(status().isMovedPermanently());
+                .andExpect(status().isFound());
 
         mockMvc.perform(get("/api/v1/urls/" + code + "/stats"))
                 .andExpect(status().isOk())
@@ -258,7 +258,7 @@ class UrlControllerIT {
         // First 60 redirects — all should succeed
         for (int i = 0; i < 60; i++) {
             mockMvc.perform(get("/" + code).header("X-Forwarded-For", testIp))
-                    .andExpect(status().isMovedPermanently());
+                    .andExpect(status().isFound());
         }
 
         // 61st — bucket exhausted, must return 429 with Retry-After
@@ -295,6 +295,42 @@ class UrlControllerIT {
         mockMvc.perform(get("/api/v1/urls/nosuchcode/stats"))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error").value("NOT_FOUND"));
+    }
+
+    // ---- GET /{code} path variable validation ----------------------------
+
+    @Test
+    @DisplayName("GET /{code}: code longer than 12 chars returns 400")
+    void redirect_codeTooLong_returns400() throws Exception {
+        String longCode = "a".repeat(13);
+        mockMvc.perform(get("/" + longCode))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("INVALID_CODE"));
+    }
+
+    @Test
+    @DisplayName("GET /{code}: code with non-alphanumeric chars returns 400")
+    void redirect_codeNonAlphanumeric_returns400() throws Exception {
+        mockMvc.perform(get("/abc!def"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("INVALID_CODE"));
+    }
+
+    @Test
+    @DisplayName("GET /api/v1/urls/{code}/stats: code longer than 12 chars returns 400")
+    void stats_codeTooLong_returns400() throws Exception {
+        String longCode = "a".repeat(13);
+        mockMvc.perform(get("/api/v1/urls/" + longCode + "/stats"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("INVALID_CODE"));
+    }
+
+    @Test
+    @DisplayName("GET /api/v1/urls/{code}/stats: code with non-alphanumeric chars returns 400")
+    void stats_codeNonAlphanumeric_returns400() throws Exception {
+        mockMvc.perform(get("/api/v1/urls/abc!def/stats"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("INVALID_CODE"));
     }
 
     // ---- helpers ---------------------------------------------------------

@@ -15,7 +15,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.cache.Cache;
 import org.springframework.cache.CacheManager;
 import org.springframework.dao.DataIntegrityViolationException;
-import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -56,18 +56,27 @@ public class UrlService {
     private final CacheManager cacheManager;
     private final MeterRegistry meterRegistry;
     // Used for per-entry TTL writes. CacheManager uses the default 24h TTL and
-    // does not expose per-entry TTL control, so we write via StringRedisTemplate directly.
-    private final StringRedisTemplate stringRedisTemplate;
+    // does not expose per-entry TTL control, so we write via ValueOperations directly.
+    // ValueOperations is an interface — straightforward to mock in unit tests without
+    // the inline-mock restrictions that apply to the concrete StringRedisTemplate class.
+    private final ValueOperations<String, String> redisValueOps;
 
     /**
      * Create a new shortened URL.
      *
-     * The existsByCode + save sequence is not atomic: two concurrent requests can both
-     * pass the existsByCode check for the same code and race to save. The UNIQUE constraint
-     * on the DB catches the loser and throws DataIntegrityViolationException. We catch it
-     * and retry with a new code, exactly as we do for the pre-check collision path.
+     * Not annotated @Transactional deliberately. The only write is urlRepository.save(),
+     * which carries its own repository-level @Transactional. Each save attempt therefore
+     * runs in its own independent transaction.
+     *
+     * If shorten() were @Transactional, a DataIntegrityViolationException from save()
+     * would cause Spring to mark the outer transaction rollback-only before the exception
+     * reaches the catch block. Catching it and retrying would then throw
+     * UnexpectedRollbackException on the next DB call — worse than the original 500.
+     *
+     * Without the outer transaction, catching DataIntegrityViolationException is safe:
+     * each save() attempt is self-contained, and the constraint violation rolls back only
+     * that attempt's transaction, leaving the method free to retry.
      */
-    @Transactional
     public ShortenResponse shorten(ShortenRequest request, String baseUrl) {
         validateUrl(request.url());
 
@@ -142,7 +151,7 @@ public class UrlService {
             // which would allow serving a stale redirect after the link expires.
             // StringRedisTemplate.setex() gives us control over the exact TTL.
             Duration ttl = computeCacheTtl(url.getExpiresAt());
-            stringRedisTemplate.opsForValue().set(CACHE_KEY_PREFIX + code, url.getLongUrl(), ttl);
+            redisValueOps.set(CACHE_KEY_PREFIX + code, url.getLongUrl(), ttl);
 
             log.info("url_resolved code={} cacheHit=false", code);
             return url.getLongUrl();

@@ -6,6 +6,8 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.cache.RedisCacheConfiguration;
 import org.springframework.data.redis.cache.RedisCacheManager;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.data.redis.serializer.RedisSerializationContext;
 import org.springframework.data.redis.serializer.StringRedisSerializer;
 
@@ -35,6 +37,16 @@ import java.util.Map;
 public class RedisConfig {
 
     private static final Duration DEFAULT_TTL = Duration.ofHours(24);
+
+    /**
+     * Exposes ValueOperations as a bean so UrlService can write per-entry cache TTLs.
+     * ValueOperations is an interface — cleanly mockable in unit tests without inline-mock
+     * bytecode instrumentation required for the concrete StringRedisTemplate class.
+     */
+    @Bean
+    public ValueOperations<String, String> redisValueOps(RedisConnectionFactory connectionFactory) {
+        return new StringRedisTemplate(connectionFactory).opsForValue();
+    }
 
     @Bean
     public RedisCacheManager cacheManager(RedisConnectionFactory connectionFactory) {

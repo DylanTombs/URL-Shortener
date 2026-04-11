@@ -154,6 +154,17 @@
                 </configuration>
             </plugin>
 
+            <!-- Surefire — unit tests. -XX:+EnableDynamicAgentLoading required for Mockito
+                 inline mocks on JDK 21+ where dynamic agent attachment is restricted by default.
+                 @{argLine} (late-binding) preserves the JaCoCo agent arg set by prepare-agent. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <argLine>@{argLine} -XX:+EnableDynamicAgentLoading</argLine>
+                </configuration>
+            </plugin>
+
             <!-- Failsafe — runs *IT.java integration tests during verify phase (requires Docker) -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

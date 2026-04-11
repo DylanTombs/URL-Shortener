@@ -205,3 +205,40 @@ Synchronous increment at current scale. The `@Modifying` query is a single index
 
 ### At 10x Scale
 Move to SQS-based async increment when `click_count` writes become a measurable fraction of redirect latency (expected threshold: >100k req/s sustained). The counter column can be backfilled from SQS events; no schema change required.
+
+
+---
+
+## Decision 8: 302 Found vs 301 Moved Permanently for Redirects
+
+**Date:** 2026-04-11
+**Status:** Accepted
+
+### Context
+The redirect endpoint (`GET /{code}`) must return an HTTP redirect to the original URL. HTTP offers multiple 3xx status codes; the two candidates are 301 (Moved Permanently) and 302 (Found).
+
+### Options Considered
+
+1. **302 Found (chosen)** — Temporary redirect. Browsers do not cache this response; every visit reaches the service.
+
+2. **301 Moved Permanently** — Permanent redirect. Browsers cache the `Location` header indefinitely. After the first visit, subsequent clicks never reach the service.
+
+3. **307 Temporary Redirect** — Like 302 but mandates method preservation (POST stays POST). Unnecessary here — all redirects originate from GET.
+
+### Decision
+302 Found. Three features break irreparably with 301:
+
+1. **Click counting** — Once a browser caches a 301, clicks never reach the service. `click_count` freezes after the first visit per browser/device.
+2. **Expiry enforcement** — A cached 301 serves the redirect even after `expires_at` has passed. The 410 GONE response can never be delivered to a browser that already cached the 301.
+3. **Cache invalidation** — If the destination URL ever changes (future feature), browsers holding a cached 301 cannot be corrected without a cache-busting URL change.
+
+The cost of 302 is one extra DNS/TLS/HTTP round-trip per redirect (vs. zero for a cached 301). At the expected scale this is negligible — the service is designed to handle this load, and accurate metrics are a core product requirement.
+
+### Consequences
+- ✅ Accurate click counts on every redirect
+- ✅ Expiry correctly enforced for all visitors
+- ✅ Future URL mutation (update/delete) takes effect immediately for all clients
+- ⚠️ No browser-side caching benefit — every redirect request hits the ALB/ECS stack
+
+### At 10x Scale
+302 remains correct. Click count accuracy and expiry enforcement are non-negotiable product requirements. Redirect latency is managed by the Redis cache layer (cache hit: ~2ms), not browser caching.

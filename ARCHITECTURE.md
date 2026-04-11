@@ -2,7 +2,7 @@
 
 ## 1. System Overview
 
-This service shortens arbitrary URLs to 8-character Base62 codes and redirects visitors with a 301. It is designed to handle millions of redirects per day at p99 < 500ms, with a read:write ratio of approximately 1000:1 typical of production URL shorteners. Every component — network, compute, database, cache, monitoring, CI/CD — is defined as Terraform infrastructure-as-code and deployed to AWS. Nothing is created manually in the console.
+This service shortens arbitrary URLs to 8-character Base62 codes and redirects visitors with a 302 Found. It is designed to handle millions of redirects per day at p99 < 500ms, with a read:write ratio of approximately 1000:1 typical of production URL shorteners. Every component — network, compute, database, cache, monitoring, CI/CD — is defined as Terraform infrastructure-as-code and deployed to AWS. Nothing is created manually in the console.
 
 ---
 
@@ -45,7 +45,7 @@ This service shortens arbitrary URLs to 8-character Base62 codes and redirects v
 8. Not found → 404; expired (current time > `expires_at`) → 410; both increment corresponding Micrometer counters
 9. Write `code → longUrl` to Redis with TTL = `min(24h, remaining time to expiry)` — ensures the entry is never served after the link expires
 10. **Controller** calls `urlService.incrementClickCount(code)` — `@Modifying` query on the **RDS primary**
-11. Return 301 with `Location` header
+11. Return 302 Found with `Location` header — not 301, which browsers cache permanently, breaking click counting and expiry enforcement (see DECISIONS.md Decision 8)
 12. Micrometer `url.redirect` timer stops; tagged `cache_hit=true|false` — published to CloudWatch
 
 ---
@@ -70,7 +70,7 @@ This service shortens arbitrary URLs to 8-character Base62 codes and redirects v
 
 **TTL formula:** `min(24 hours, time remaining until link expiry)`
 
-This is the critical invariant. A link expiring in 2 hours gets a 2-hour Redis TTL, not 24 hours. If the TTL were fixed at 24 hours, a redirect could be served from Redis for up to 24 hours after the link expired — returning a 301 to the original URL when a 410 should be returned. The `min()` formula prevents this entirely.
+This is the critical invariant. A link expiring in 2 hours gets a 2-hour Redis TTL, not 24 hours. If the TTL were fixed at 24 hours, a redirect could be served from Redis for up to 24 hours after the link expired — returning a 302 to the original URL when a 410 should be returned. The `min()` formula prevents this entirely.
 
 **Why explicit cache-aside instead of `@Cacheable`:** `@Cacheable` hides the hit/miss result from the application. The Micrometer `url.redirect` timer needs a `cache_hit` tag to distinguish hit latency from miss latency in CloudWatch. Explicit cache-aside makes the hit/miss observable.
 
@@ -121,7 +121,7 @@ All compute and data resources have no inbound path from the internet. The only 
 
 **Deployments:** Rolling update strategy. ECS replaces one task at a time, routing traffic only to tasks that pass the ALB health check (`/actuator/health`). ECS circuit breaker automatically reverts the deployment if the new tasks fail health checks — no manual intervention required for a bad deploy.
 
-**Health check:** `/actuator/health` verifies both the Redis connection and the RDS connection. A task reporting anything other than `UP` is removed from the ALB target group within 30 seconds (three consecutive health check failures at 10-second intervals).
+**Health check:** `/actuator/health` returns `{"status":"UP"}` to unauthenticated callers (including the ALB health check). Component-level detail (Redis and RDS connection state) is available only to authenticated callers (`show-details: when_authorized`). A task reporting anything other than `UP` is removed from the ALB target group within 30 seconds (three consecutive health check failures at 10-second intervals).
 
 **Observability:** Every request carries a `traceId` (set by `MdcRequestIdFilter`) that appears as a top-level field in all JSON log lines. To trace a specific request: CloudWatch Logs Insights → filter `traceId = "<id>"`. The CloudWatch dashboard shows redirect latency percentiles, cache hit rate, URL creation/error counts, and RDS CPU in a single view.
 

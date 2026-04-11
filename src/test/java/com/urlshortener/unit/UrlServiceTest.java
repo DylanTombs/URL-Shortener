@@ -21,7 +21,6 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.cache.Cache;
 import org.springframework.cache.CacheManager;
-import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 
 import java.time.Duration;
@@ -57,7 +56,7 @@ class UrlServiceTest {
     private CacheManager cacheManager;
 
     @Mock
-    private StringRedisTemplate stringRedisTemplate;
+    private ValueOperations<String, String> redisValueOps;
 
     // SimpleMeterRegistry is an in-memory registry — no external dependencies needed
     private final MeterRegistry meterRegistry = new SimpleMeterRegistry();
@@ -66,16 +65,12 @@ class UrlServiceTest {
 
     @BeforeEach
     void setUp() {
-        urlService = new UrlService(urlRepository, codeGenerator, cacheManager, meterRegistry, stringRedisTemplate);
+        urlService = new UrlService(urlRepository, codeGenerator, cacheManager, meterRegistry, redisValueOps);
         // Default: cache returns no hit (miss path) so resolveUrl tests hit the DB.
         // lenient() because shorten/getStats tests don't call resolveUrl() and never touch the cache.
         Cache cache = mock(Cache.class);
         lenient().when(cacheManager.getCache("urls")).thenReturn(cache);
         lenient().when(cache.get(anyString())).thenReturn(null);
-        // Default: stub ValueOperations so resolveUrl cache-miss path doesn't NPE on the set() call.
-        @SuppressWarnings("unchecked")
-        ValueOperations<String, String> valueOps = mock(ValueOperations.class);
-        lenient().when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
     }
 
     // ---- shorten() -------------------------------------------------------
@@ -261,14 +256,10 @@ class UrlServiceTest {
                 .createdAt(Instant.now()).expiresAt(null).clickCount(0).build();
         when(urlRepository.findByCode(CODE)).thenReturn(Optional.of(url));
 
-        @SuppressWarnings("unchecked")
-        ValueOperations<String, String> valueOps = mock(ValueOperations.class);
-        when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
-
         urlService.resolveUrl(CODE);
 
         ArgumentCaptor<Duration> ttlCaptor = ArgumentCaptor.forClass(Duration.class);
-        verify(valueOps).set(eq("urls::" + CODE), eq("https://example.com"), ttlCaptor.capture());
+        verify(redisValueOps).set(eq("urls::" + CODE), eq("https://example.com"), ttlCaptor.capture());
         assertThat(ttlCaptor.getValue()).isEqualTo(Duration.ofHours(24));
     }
 
@@ -281,14 +272,10 @@ class UrlServiceTest {
                 .createdAt(Instant.now()).expiresAt(expiresAt).clickCount(0).build();
         when(urlRepository.findByCode(CODE)).thenReturn(Optional.of(url));
 
-        @SuppressWarnings("unchecked")
-        ValueOperations<String, String> valueOps = mock(ValueOperations.class);
-        when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
-
         urlService.resolveUrl(CODE);
 
         ArgumentCaptor<Duration> ttlCaptor = ArgumentCaptor.forClass(Duration.class);
-        verify(valueOps).set(eq("urls::" + CODE), eq("https://example.com"), ttlCaptor.capture());
+        verify(redisValueOps).set(eq("urls::" + CODE), eq("https://example.com"), ttlCaptor.capture());
         // TTL must be well under 24 hours — approximately 5 minutes
         assertThat(ttlCaptor.getValue()).isLessThan(Duration.ofMinutes(6));
         assertThat(ttlCaptor.getValue()).isGreaterThan(Duration.ofMinutes(4));

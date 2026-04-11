@@ -139,12 +139,12 @@ class RateLimitInterceptorTest {
 
     // ── helpers ────────────────────────────────────────────────────────────
 
-    // doReturn bypasses Mockito's compile-time generic type check on BucketProxy,
-    // which is the return type of RemoteBucketBuilder.build() in Bucket4j 8.x.
+    // ConsumptionProbe is a final class — use its static factory methods instead of mocking
+    // to avoid ByteBuddy inline-instrumentation restrictions on JDK 21+.
+    // doReturn bypasses Mockito's compile-time generic type check on BucketProxy.
     @SuppressWarnings({"unchecked", "rawtypes"})
     private void stubBucketConsumed() {
-        ConsumptionProbe probe = mock(ConsumptionProbe.class);
-        when(probe.isConsumed()).thenReturn(true);
+        ConsumptionProbe probe = ConsumptionProbe.consumed(59, 0);
 
         BucketProxy bucket = mock(BucketProxy.class);
         when(bucket.tryConsumeAndReturnRemaining(1)).thenReturn(probe);
@@ -156,9 +156,7 @@ class RateLimitInterceptorTest {
 
     @SuppressWarnings({"unchecked", "rawtypes"})
     private void stubBucketExhausted(long nanosToWait) {
-        ConsumptionProbe probe = mock(ConsumptionProbe.class);
-        when(probe.isConsumed()).thenReturn(false);
-        when(probe.getNanosToWaitForRefill()).thenReturn(nanosToWait);
+        ConsumptionProbe probe = ConsumptionProbe.rejected(0, nanosToWait, nanosToWait);
 
         BucketProxy bucket = mock(BucketProxy.class);
         when(bucket.tryConsumeAndReturnRemaining(1)).thenReturn(probe);

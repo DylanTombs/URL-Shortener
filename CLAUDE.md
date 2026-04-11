@@ -56,7 +56,7 @@ Body: { "url": "https://...", "ttlDays": 30 }   (ttlDays optional)
 422: { "error": "INVALID_URL", "message": "..." }
 
 GET /{code}
-301: Location: https://original-url.com
+302: Location: https://original-url.com
 404: { "error": "NOT_FOUND" }
 410: { "error": "EXPIRED" }
 
@@ -64,7 +64,8 @@ GET /api/v1/urls/{code}/stats
 200: { "code": "aB3xK9mQ", "clickCount": 142, "createdAt": "..." }
 
 GET /actuator/health
-200: { "status": "UP", "redis": "UP", "db": "UP" }
+200: { "status": "UP" }                                    (unauthenticated)
+200: { "status": "UP", "components": { "redis": ..., "db": ... } }  (authenticated)
 ```
 
 API is versioned at /api/v1/ from day one. Non-negotiable — APIs are contracts.
@@ -182,26 +183,20 @@ All endpoints, unit + integration tests (Testcontainers), JaCoCo 80% gate.
 ### Phase 5 — Polish and Documentation ✅ COMPLETE
 k6 load tests (smoke/load/spike), ARCHITECTURE.md, DECISIONS.md, RUNBOOK.md, README updated.
 
-### Phase 6 — Code Quality & Correctness (Current Phase)
+### Phase 6 — Code Quality & Correctness ✅ COMPLETE
 Fixes from FAANG-level review. Four correctness bugs, four quality issues.
+min(24h, ttl) cache TTL, concurrent-insert collision handling via DataIntegrityViolationException,
+InvalidUrlException replacing IllegalArgumentException, logstash-logback-encoder for JSON safety,
+StringRedisSerializer, V2 migration dropping redundant index, cache-hit log line,
+show-details: when_authorized in prod / always in dev profile, prometheus removed from actuator,
+ObjectMapper-based extractCode() in IT, @EnableCaching on RedisConfig.
 
-**Correctness (fix first):**
-- [ ] 6.1 Implement `min(24h, time-to-expiry)` cache TTL in `UrlService.resolveUrl()` — docs promise this, code doesn't do it
-- [ ] 6.2 Catch `DataIntegrityViolationException` in `shorten()` — concurrent inserts currently 500
-- [ ] 6.3 Replace `IllegalArgumentException` handler with custom `InvalidUrlException` — too broad, catches framework internals
-- [ ] 6.4 Fix JSON logging — replace pattern-string JSON with `logstash-logback-encoder` (quotes/newlines break current output)
-
-**Quality:**
-- [ ] 6.5 Use `StringRedisSerializer` for URL cache values (current: Jackson wraps strings in type metadata)
-- [ ] 6.6 Drop redundant `idx_shortened_urls_code` index — UNIQUE constraint already creates one (`V2__` migration)
-- [ ] 6.7 Add cache-hit log line in `resolveUrl()` — cache-hit redirects currently leave no trace
-- [ ] 6.8 Set `health.show-details: when_authorized` in prod config (currently `always`)
-
-**Minor:**
-- [ ] 6.9 Remove `prometheus` from actuator exposure (no scraper exists)
-- [ ] 6.10 Replace string-index `extractCode()` in `UrlControllerIT` with `ObjectMapper`
-- [ ] 6.11 Add `@EnableCaching` to `RedisConfig`
-- [ ] See `docs/phase6.md` for full implementation details
+### Phase 7 — Correctness Hardening ✅ COMPLETE
+Post-phase-6 review fixes. See `docs/phase7.md` for full details.
+- 7.1 Removed @Transactional from shorten() — catching DataIntegrityViolationException inside a tx poisons it
+- 7.2 Changed 301 → 302 — 301 breaks click counting, expiry enforcement, and cache metrics (Decision 8)
+- 7.3 Added @Validated + @Size/@Pattern on code path variables; ConstraintViolationException → 400 INVALID_CODE
+- 7.4 Docs drift fixed: API contract 301→302, phase tracker updated
 
 ---
 
