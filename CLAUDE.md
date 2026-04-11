@@ -198,6 +198,20 @@ Post-phase-6 review fixes. See `docs/phase7.md` for full details.
 - 7.3 Added @Validated + @Size/@Pattern on code path variables; ConstraintViolationException → 400 INVALID_CODE
 - 7.4 Docs drift fixed: API contract 301→302, phase tracker updated
 
+### Phase 8 — Operational Resilience (Current Phase)
+Fixes the three critical gaps that would cause a Redis or DB incident to become a service
+outage. See `docs/phase8.md` for full implementation details.
+
+**Critical:**
+- [ ] 8.1 Handle Redis failures gracefully — rate limiter and cache both fail open instead of 500
+- [ ] 8.2 Make click count increment durable — graceful shutdown + isolated catch in controller
+- [ ] 8.3 Sanitize external headers — validate X-Request-ID against allowlist, validate X-Forwarded-For IPs
+
+**Medium:**
+- [ ] 8.4 Split liveness and readiness health probes — ECS liveness vs ALB readiness
+- [ ] 8.5 Add request size limit and URL length validation — @Size(max=2048) on ShortenRequest.url
+- [ ] 8.6 Add Hibernate query timeout — 5s cap prevents slow queries exhausting connection pool
+
 ---
 
 ## Interview Justification Points
