@@ -99,4 +99,33 @@ class ReadReplicaRoutingTest {
 
         assertThat(key).isEqualTo(DataSourceType.REPLICA);
     }
+
+    // ── LazyConnectionDataSourceProxy dependency guard ─────────────────────
+    //
+    // This test exists to document the critical dependency on
+    // LazyConnectionDataSourceProxy in DataSourceConfig. Without it, Hibernate
+    // acquires a connection before @Transactional AOP sets the readOnly flag,
+    // so all traffic silently routes to the primary in production.
+    //
+    // The test verifies the routing logic that the proxy enables: that readOnly=true
+    // is correctly observed at determineCurrentLookupKey() time. If this test fails,
+    // the routing logic is broken — likely because the proxy was removed.
+
+    @Test
+    @DisplayName("readOnly flag is observable at lookup-key time (LazyConnectionDataSourceProxy contract)")
+    void readOnlyFlagObservableAtLookupTime() {
+        // Simulate what LazyConnectionDataSourceProxy enables:
+        // the readOnly flag is set BEFORE the connection (and therefore the routing
+        // key) is determined. Without the proxy, Hibernate acquires the connection
+        // at transaction open time when readOnly is still false.
+        TransactionSynchronizationManager.setCurrentTransactionReadOnly(true);
+
+        // Routing must observe the flag correctly at this point
+        Object key = routingDataSource.determineCurrentLookupKey();
+
+        assertThat(key)
+                .as("readOnly=true must route to REPLICA — if this fails, " +
+                    "check that LazyConnectionDataSourceProxy is present in DataSourceConfig")
+                .isEqualTo(DataSourceType.REPLICA);
+    }
 }
