@@ -125,14 +125,21 @@ public class UrlService {
         Timer.Sample sample = Timer.start(meterRegistry);
         boolean cacheHit = false;
         try {
-            Cache cache = cacheManager.getCache(CACHE_NAME);
-            if (cache != null) {
-                Cache.ValueWrapper cached = cache.get(code);
-                if (cached != null) {
-                    cacheHit = true;
-                    log.debug("url_resolved code={} cacheHit=true", code);
-                    return (String) cached.get();
+            // Cache read — fail open on Redis errors (treat as miss, fall through to DB).
+            // A Redis outage must not convert a successful redirect into a 500.
+            try {
+                Cache cache = cacheManager.getCache(CACHE_NAME);
+                if (cache != null) {
+                    Cache.ValueWrapper cached = cache.get(code);
+                    if (cached != null) {
+                        cacheHit = true;
+                        log.debug("url_resolved code={} cacheHit=true", code);
+                        return (String) cached.get();
+                    }
                 }
+            } catch (Exception e) {
+                log.warn("cache_read_failed code={} — falling back to DB", code, e);
+                meterRegistry.counter("cache.error", "operation", "read").increment();
             }
 
             ShortenedUrl url = urlRepository.findByCode(code)
@@ -146,12 +153,15 @@ public class UrlService {
                 throw new UrlExpiredException(code);
             }
 
-            // Write with per-entry TTL: min(24h, time remaining until expiry).
-            // Spring Cache's cache.put() always applies the default 24h TTL from RedisConfig,
-            // which would allow serving a stale redirect after the link expires.
-            // StringRedisTemplate.setex() gives us control over the exact TTL.
-            Duration ttl = computeCacheTtl(url.getExpiresAt());
-            redisValueOps.set(CACHE_KEY_PREFIX + code, url.getLongUrl(), ttl);
+            // Cache write — best effort. A write failure is not fatal: the redirect
+            // still succeeds, just uncached (next request will re-hit the DB).
+            try {
+                Duration ttl = computeCacheTtl(url.getExpiresAt());
+                redisValueOps.set(CACHE_KEY_PREFIX + code, url.getLongUrl(), ttl);
+            } catch (Exception e) {
+                log.warn("cache_write_failed code={} — redirect will serve from DB next request", code, e);
+                meterRegistry.counter("cache.error", "operation", "write").increment();
+            }
 
             log.info("url_resolved code={} cacheHit=false", code);
             return url.getLongUrl();

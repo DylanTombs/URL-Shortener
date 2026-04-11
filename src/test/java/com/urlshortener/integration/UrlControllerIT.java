@@ -149,6 +149,28 @@ class UrlControllerIT {
                 .andExpect(status().isUnprocessableEntity());
     }
 
+    @Test
+    @DisplayName("POST /api/v1/urls: URL exceeding 2048 chars returns 422")
+    void shorten_urlTooLong_returns422() throws Exception {
+        String longUrl = "https://example.com/" + "a".repeat(2048);
+        mockMvc.perform(post("/api/v1/urls")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"url\": \"" + longUrl + "\"}"))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.error").value("INVALID_URL"));
+    }
+
+    @Test
+    @DisplayName("POST /api/v1/urls: ttlDays exceeding 3650 returns 422")
+    void shorten_ttlDaysTooLarge_returns422() throws Exception {
+        mockMvc.perform(post("/api/v1/urls")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"url": "https://example.com", "ttlDays": 9999999}
+                                """))
+                .andExpect(status().isUnprocessableEntity());
+    }
+
     // ---- GET /{code} -----------------------------------------------------
 
     @Test

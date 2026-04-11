@@ -34,6 +34,7 @@ import org.springframework.dao.DataIntegrityViolationException;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -312,6 +313,45 @@ class UrlServiceTest {
         assertThatThrownBy(() -> urlService.getStats("unknown"))
                 .isInstanceOf(UrlNotFoundException.class);
     }
+
+    // ---- resolveUrl() — Redis failure resilience -------------------------
+
+    @Test
+    @DisplayName("resolveUrl: cache read throws → falls back to DB, returns long URL")
+    void resolveUrl_cacheReadThrows_fallsBackToDb() {
+        ShortenedUrl url = ShortenedUrl.builder()
+                .code(CODE).longUrl("https://example.com/fallback")
+                .createdAt(Instant.now()).expiresAt(null).clickCount(0).build();
+
+        Cache cache = mock(Cache.class);
+        when(cacheManager.getCache("urls")).thenReturn(cache);
+        when(cache.get(CODE)).thenThrow(new RuntimeException("Redis connection refused"));
+        when(urlRepository.findByCode(CODE)).thenReturn(Optional.of(url));
+
+        // Should not throw — cache failure is treated as a miss
+        String result = urlService.resolveUrl(CODE);
+
+        assertThat(result).isEqualTo("https://example.com/fallback");
+    }
+
+    @Test
+    @DisplayName("resolveUrl: cache write throws → redirect still returns long URL")
+    void resolveUrl_cacheWriteThrows_stillReturnsLongUrl() {
+        ShortenedUrl url = ShortenedUrl.builder()
+                .code(CODE).longUrl("https://example.com/write-fail")
+                .createdAt(Instant.now()).expiresAt(null).clickCount(0).build();
+
+        when(urlRepository.findByCode(CODE)).thenReturn(Optional.of(url));
+        doThrow(new RuntimeException("Redis write timeout"))
+                .when(redisValueOps).set(anyString(), anyString(), any(Duration.class));
+
+        // Should not throw — cache write failure is logged and ignored
+        String result = urlService.resolveUrl(CODE);
+
+        assertThat(result).isEqualTo("https://example.com/write-fail");
+    }
+
+    // ---- getStats() ------------------------------------------------------
 
     @Test
     @DisplayName("getStats: returns click count and createdAt")

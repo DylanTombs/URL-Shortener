@@ -11,8 +11,8 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
-import java.util.Optional;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 /**
  * Servlet filter that assigns a trace ID to every HTTP request and places it
@@ -37,15 +37,22 @@ public class MdcRequestIdFilter extends OncePerRequestFilter {
     static final String TRACE_ID_HEADER = "X-Request-ID";
     static final String MDC_KEY = "traceId";
 
+    // Allowlist: alphanumeric and hyphens only, max 36 chars (UUID length).
+    // Rejects CRLF injection attempts and other header-smuggling payloads.
+    // If the inbound value fails validation we generate a fresh UUID instead of
+    // echoing untrusted data back in the response header.
+    private static final Pattern TRACE_ID_PATTERN = Pattern.compile("^[a-zA-Z0-9\\-]{1,36}$");
+
     @Override
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
                                     FilterChain filterChain)
             throws ServletException, IOException {
 
-        String traceId = Optional.ofNullable(request.getHeader(TRACE_ID_HEADER))
-                .filter(s -> !s.isBlank())
-                .orElse(UUID.randomUUID().toString());
+        String inbound = request.getHeader(TRACE_ID_HEADER);
+        String traceId = (inbound != null && TRACE_ID_PATTERN.matcher(inbound).matches())
+                ? inbound
+                : UUID.randomUUID().toString();
 
         MDC.put(MDC_KEY, traceId);
         response.setHeader(TRACE_ID_HEADER, traceId);
