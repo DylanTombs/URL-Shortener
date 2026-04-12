@@ -21,6 +21,11 @@
         <java.version>21</java.version>
         <testcontainers.version>1.21.3</testcontainers.version>
         <bucket4j.version>8.10.1</bucket4j.version>
+        <!-- Lombok 1.18.36 (from Spring Boot 3.4.3 BOM) does not support JDK 25's
+             internal compiler APIs (TypeTag :: UNKNOWN on clean build). 1.18.38+
+             adds JDK 25 compatibility. Override here; BOM version is still used for
+             the runtime dependency and Spring Boot plugin exclusion. -->
+        <lombok.version>1.18.38</lombok.version>
     </properties>
 
     <dependencies>
@@ -141,6 +146,26 @@
 
     <build>
         <plugins>
+            <!-- Explicit annotationProcessorPaths required for Lombok on JDK 21+.
+                 The Spring Boot parent POM registers Lombok via the default compiler
+                 configuration, but this is not reliably honoured on JDK 25 without
+                 an explicit annotationProcessorPaths entry. Without this, a clean
+                 build fails: generated getters/setters/builders are not present and
+                 compilation reports "cannot find symbol" on Lombok-generated methods.
+                 Lombok version is sourced from spring-boot-starter-parent's BOM. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <annotationProcessorPaths>
+                        <path>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                        </path>
+                    </annotationProcessorPaths>
+                </configuration>
+            </plugin>
+
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>

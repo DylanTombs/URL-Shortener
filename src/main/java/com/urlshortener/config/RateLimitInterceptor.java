@@ -11,7 +11,8 @@ import org.springframework.http.MediaType;
 import org.springframework.web.servlet.HandlerInterceptor;
 
 import java.io.IOException;
-import java.util.Optional;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 
 /**
  * HTTP interceptor that enforces per-IP rate limits using Bucket4j.
@@ -48,15 +49,23 @@ public class RateLimitInterceptor implements HandlerInterceptor {
                 ? RateLimitConfig.redirectBucketConfig()
                 : RateLimitConfig.createBucketConfig();
 
-        ConsumptionProbe probe = proxyManager.builder()
-                .build(bucketKey, () -> config)
-                .tryConsumeAndReturnRemaining(1);
+        ConsumptionProbe probe;
+        try {
+            probe = proxyManager.builder()
+                    .build(bucketKey, () -> config)
+                    .tryConsumeAndReturnRemaining(1);
+        } catch (Exception e) {
+            // Redis unavailable — fail open. Rate limiting is a defence layer, not a
+            // hard dependency. A Redis outage must not take down the redirect path.
+            log.warn("rate_limiter_unavailable clientIp={} route={} — failing open", clientIp, routeKey, e);
+            return true;
+        }
 
         if (probe.isConsumed()) {
             return true;
         }
 
-        long waitSeconds = Math.max(1L, probe.getNanosToWaitForRefill() / 1_000_000_000L);
+        long waitSeconds = Math.min(3600L, Math.max(1L, probe.getNanosToWaitForRefill() / 1_000_000_000L));
         log.warn("rate_limit_exceeded clientIp={} route={} retryAfterSeconds={}", clientIp, routeKey, waitSeconds);
 
         response.setStatus(429);
@@ -91,12 +100,33 @@ public class RateLimitInterceptor implements HandlerInterceptor {
 
     /**
      * Extracts the real client IP from X-Forwarded-For (set by ALB).
-     * ALB always appends the actual client IP as the last value, but the
-     * first value is the original source — which is what we want for rate limiting.
+     * The first value is the original source IP — what we want for rate limiting.
+     *
+     * The candidate IP is validated with InetAddress.getByName() before use.
+     * An invalid value (e.g. injected string, CRLF fragment) is rejected and the
+     * request's remoteAddr is used instead, preventing IP spoofing of rate limit buckets.
      */
     private static String extractClientIp(HttpServletRequest request) {
-        return Optional.ofNullable(request.getHeader("X-Forwarded-For"))
-                .map(xff -> xff.split(",")[0].trim())
-                .orElse(request.getRemoteAddr());
+        String xff = request.getHeader("X-Forwarded-For");
+        if (xff != null && !xff.isBlank()) {
+            String candidate = xff.split(",")[0].trim();
+            if (isValidIpAddress(candidate)) {
+                return candidate;
+            }
+            log.warn("xff_invalid_ip xff={} — falling back to remoteAddr", xff);
+        }
+        return request.getRemoteAddr();
+    }
+
+    private static boolean isValidIpAddress(String ip) {
+        if (ip == null || ip.isEmpty()) {
+            return false;
+        }
+        try {
+            InetAddress.getByName(ip);
+            return true;
+        } catch (UnknownHostException e) {
+            return false;
+        }
     }
 }

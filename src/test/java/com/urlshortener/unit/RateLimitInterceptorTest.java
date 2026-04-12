@@ -124,7 +124,7 @@ class RateLimitInterceptorTest {
     // ── X-Forwarded-For extraction ─────────────────────────────────────────
 
     @Test
-    @DisplayName("X-Forwarded-For header: first IP used as client IP")
+    @DisplayName("X-Forwarded-For header: first valid IP used as client IP")
     void xForwardedFor_firstIpUsed() throws Exception {
         request.setMethod("GET");
         request.setRequestURI("/aB3xK9mQ");
@@ -135,6 +135,40 @@ class RateLimitInterceptorTest {
         boolean result = interceptor.preHandle(request, response, null);
 
         assertThat(result).isTrue();
+    }
+
+    @Test
+    @DisplayName("X-Forwarded-For header: invalid IP falls back to remoteAddr")
+    void xForwardedFor_invalidIp_fallsBackToRemoteAddr() throws Exception {
+        request.setMethod("GET");
+        request.setRequestURI("/aB3xK9mQ");
+        request.addHeader("X-Forwarded-For", "not-an-ip-address");
+        request.setRemoteAddr("10.0.0.5");
+
+        stubBucketConsumed();
+
+        // Should still succeed — fallback to remoteAddr used as bucket key
+        boolean result = interceptor.preHandle(request, response, null);
+
+        assertThat(result).isTrue();
+    }
+
+    // ── Redis failure (fail open) ──────────────────────────────────────────
+
+    @Test
+    @DisplayName("Redis unavailable: rate limiter fails open and allows request")
+    void redisUnavailable_failsOpen() throws Exception {
+        request.setMethod("GET");
+        request.setRequestURI("/aB3xK9mQ");
+        request.setRemoteAddr("10.0.0.6");
+
+        // proxyManager throws when Redis is unreachable
+        when(proxyManager.builder()).thenThrow(new RuntimeException("Redis connection refused"));
+
+        boolean result = interceptor.preHandle(request, response, null);
+
+        assertThat(result).isTrue();
+        assertThat(response.getStatus()).isNotEqualTo(429);
     }
 
     // ── helpers ────────────────────────────────────────────────────────────

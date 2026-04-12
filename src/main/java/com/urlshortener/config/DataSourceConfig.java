@@ -85,9 +85,21 @@ public class DataSourceConfig {
         routing.setDefaultTargetDataSource(primaryDataSource);
         routing.afterPropertiesSet();
 
-        // LazyConnectionDataSourceProxy defers physical connection acquisition
-        // until the first SQL statement, so TransactionSynchronizationManager's
-        // readOnly flag is set before the routing lookup key is evaluated.
+        // CRITICAL: LazyConnectionDataSourceProxy MUST wrap the routing source.
+        //
+        // Without it, Hibernate acquires a physical connection at transaction open
+        // time — before @Transactional AOP has a chance to call
+        // TransactionSynchronizationManager.setCurrentTransactionReadOnly(true).
+        // ReadWriteRoutingDataSource.determineCurrentLookupKey() then reads a stale
+        // readOnly=false flag and routes ALL traffic to the primary, silently.
+        //
+        // The failure mode is invisible: the app starts, all tests pass (because both
+        // datasources point to the same container in the test environment), and all
+        // reads hit the primary in production until someone notices the replica is idle.
+        //
+        // ReadReplicaRoutingTest verifies the routing logic in isolation. The
+        // integration tests verify end-to-end behaviour with both datasources wired.
+        // Do not remove this wrapper.
         return new LazyConnectionDataSourceProxy(routing);
     }
 }

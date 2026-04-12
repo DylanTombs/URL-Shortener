@@ -13,19 +13,25 @@ import java.util.Optional;
 /**
  * Data access for shortened_urls table.
  *
- * Read-path (findByCode) is routed to the read replica via DataSource routing.
- * The repository itself stays ignorant of replica logic — routing is handled
- * at the DataSource level by ReadWriteRoutingDataSource.
+ * Read-path methods are annotated @Transactional(readOnly=true) at the repository
+ * level. This makes the routing contract explicit: read-only methods route to the
+ * replica regardless of the caller's transaction context, preventing reads from
+ * silently hitting the primary if someone calls the repo directly.
+ *
+ * Write methods use @Transactional(readOnly=false) explicitly for the same reason —
+ * clarity over implicit defaults.
  */
 @Repository
 public interface UrlRepository extends JpaRepository<ShortenedUrl, Long> {
 
+    @Transactional(readOnly = true)
     Optional<ShortenedUrl> findByCode(String code);
 
+    @Transactional(readOnly = true)
     boolean existsByCode(String code);
 
     @Modifying
-    @Transactional
+    @Transactional(readOnly = false)
     @Query("UPDATE ShortenedUrl u SET u.clickCount = u.clickCount + 1 WHERE u.code = :code")
     void incrementClickCount(@Param("code") String code);
 }

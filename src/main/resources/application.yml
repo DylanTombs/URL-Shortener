@@ -1,4 +1,18 @@
+server:
+  # Graceful shutdown: on SIGTERM, stop accepting new requests and wait up to 30s
+  # for in-flight requests to complete before the JVM exits. This ensures a redirect
+  # that reached resolveUrl() also completes incrementClickCount() before the task
+  # is deregistered by ECS. ALB deregistration delay (30s) is configured to match.
+  shutdown: graceful
+  tomcat:
+    # Reject oversized request bodies before Spring parses them.
+    # 2048-char URL + JSON overhead fits comfortably within 8KB.
+    max-http-post-size: 8192
+
 spring:
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+
   application:
     name: url-shortener
 
@@ -25,6 +39,11 @@ spring:
       hibernate:
         dialect: org.hibernate.dialect.PostgreSQLDialect
         format_sql: false
+        query:
+          # 5-second query timeout. Typical redirect DB query: <5ms.
+          # Prevents a single lock-contention or runaway query from holding a HikariCP
+          # thread indefinitely and exhausting the connection pool across all ECS tasks.
+          timeout: 5000
 
   data:
     redis:
@@ -53,7 +72,19 @@ management:
       # Prevents exposing pool state, Redis/DB connection info to unauthenticated requests.
       # Override to 'always' in application-dev.yml for local debugging.
       show-details: when_authorized
+      # Expose separate liveness and readiness probes.
+      # /actuator/health/liveness  — ECS container health check (restart if DOWN)
+      # /actuator/health/readiness — ALB target group health check (deregister if DOWN)
+      # Liveness answers "is the JVM alive?"; readiness answers "can this task serve traffic?"
+      # A Redis/DB failure makes the task not-ready (remove from ALB) without triggering
+      # an unnecessary container restart.
+      probes:
+        enabled: true
   health:
+    livenessState:
+      enabled: true
+    readinessState:
+      enabled: true
     redis:
       enabled: true
     db:

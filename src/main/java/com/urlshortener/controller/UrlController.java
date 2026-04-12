@@ -73,7 +73,13 @@ public class UrlController {
             String code) {
 
         String longUrl = urlService.resolveUrl(code);
-        urlService.incrementClickCount(code);
+        // Isolated catch: a DB write failure must not convert a successful redirect into
+        // a 500. The redirect has already been determined; counting is best-effort.
+        try {
+            urlService.incrementClickCount(code);
+        } catch (Exception e) {
+            log.error("click_count_increment_failed code={}", code, e);
+        }
         return ResponseEntity.status(HttpStatus.FOUND)
                 .header(HttpHeaders.LOCATION, longUrl)
                 .build();
